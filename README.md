@@ -68,7 +68,8 @@ Chaque ligne correspond à un `ScanResult` reçu.
 
 | Colonne | Description |
 |---|---|
-| `wall_time_iso` | Date/heure de reception au format ISO avec millisecondes. |
+| `wall_time_iso` | Date/heure de reception au format ISO UTC avec millisecondes (`Z`). |
+| `wall_time_local` | Date/heure locale du telephone avec offset de fuseau, par exemple `2026-05-19T16:18:28.357+02:00`. |
 | `wall_time_ms_epoch` | Date/heure de reception en millisecondes epoch. |
 | `timestamp_nanos_android` | Timestamp Android du `ScanResult`, en nanosecondes. |
 | `address` | Adresse BLE vue par Android. Peut être randomisée. |

@@ -754,7 +754,8 @@ class MainActivity : android.app.Activity() {
 
     private fun formatCsvPreview(values: List<String>, indexes: Map<String, Int>): String {
         val type = classifyCsvRow(values, indexes)
-        val time = value(values, indexes, "wall_time_iso")
+        val time = value(values, indexes, "wall_time_local")
+            .ifBlank { value(values, indexes, "wall_time_iso") }
         val address = value(values, indexes, "address")
         val rssi = value(values, indexes, "rssi_dbm")
         val name = value(values, indexes, "device_name")

@@ -7,6 +7,7 @@ import com.example.blescanner.parser.BeaconParser
 import com.example.blescanner.parser.HexUtils
 import java.io.File
 import java.time.Instant
+import java.time.ZoneId
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 
@@ -35,6 +36,7 @@ class BleCsvLogger(
         rawWriter.write(
             listOf(
                 iso(nowMs),
+                localIso(nowMs),
                 nowMs,
                 result.timestampNanos,
                 result.device.address,
@@ -81,6 +83,9 @@ class BleCsvLogger(
     private fun iso(epochMs: Long): String =
         DateTimeFormatter.ISO_INSTANT.format(Instant.ofEpochMilli(epochMs).atOffset(ZoneOffset.UTC))
 
+    private fun localIso(epochMs: Long): String =
+        DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(Instant.ofEpochMilli(epochMs).atZone(ZoneId.systemDefault()))
+
     private fun parserLabel(parsed: com.example.blescanner.parser.ParsedAdvertising): String =
         when {
             parsed.datiRoom.isNotBlank() -> "DATI ${parsed.datiRoom}"
@@ -102,6 +107,7 @@ class BleCsvLogger(
     companion object {
         private val RAW_HEADER = listOf(
             "wall_time_iso",
+            "wall_time_local",
             "wall_time_ms_epoch",
             "timestamp_nanos_android",
             "address",
