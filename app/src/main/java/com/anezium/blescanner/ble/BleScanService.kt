@@ -1,4 +1,4 @@
-package com.example.blescanner.ble
+package com.anezium.blescanner.ble
 
 import android.Manifest
 import android.annotation.SuppressLint
@@ -14,15 +14,26 @@ import android.bluetooth.le.ScanSettings
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import com.example.blescanner.data.BleCsvLogger
+import com.anezium.blescanner.data.BleCsvLogger
 
 class BleScanService : Service() {
     private var logger: BleCsvLogger? = null
+    private var scanActive = false
+    private val mainHandler = Handler(Looper.getMainLooper())
     private val scanner by lazy {
         (getSystemService(BLUETOOTH_SERVICE) as BluetoothManager).adapter.bluetoothLeScanner
+    }
+
+    private val watchdogRestart = object : Runnable {
+        override fun run() {
+            restartScanForWatchdog()
+        }
     }
 
     private val callback = object : ScanCallback() {
@@ -85,6 +96,7 @@ class BleScanService : Service() {
             return
         }
 
+        if (scanStartedAtElapsedMs == 0L) scanStartedAtElapsedMs = SystemClock.elapsedRealtime()
         startForeground(NOTIFICATION_ID, notification("Scan BLE en cours"))
         if (logger != null) return
 
@@ -96,6 +108,8 @@ class BleScanService : Service() {
 
         runCatching {
             scanner.startScan(null, settings, callback)
+            scanActive = true
+            scheduleWatchdogRestart()
             Log.i(TAG, "BluetoothLeScanner.startScan called")
             publishStatus("Scan BLE démarré")
         }.onFailure {
@@ -108,15 +122,66 @@ class BleScanService : Service() {
     @SuppressLint("MissingPermission")
     private fun stopScanning() {
         Log.i(TAG, "stopScanning")
+        cancelWatchdogRestart()
         runCatching {
             if (hasScanPermission()) scanner.stopScan(callback)
         }.onFailure {
             Log.w(TAG, "stopScan failed", it)
         }
+        scanActive = false
         logger?.close()
         logger = null
+        scanStartedAtElapsedMs = 0L
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun restartScanForWatchdog() {
+        if (logger == null || !scanActive) return
+        if (!hasScanPermission()) {
+            publishStatus("Relance anti-throttle annulee: permission Bluetooth manquante")
+            stopScanning()
+            return
+        }
+
+        Log.i(TAG, "Watchdog restarting BLE scan before Android timeout")
+        publishStatus("Relance anti-throttle BLE")
+        runCatching {
+            scanner.stopScan(callback)
+        }.onFailure {
+            Log.w(TAG, "watchdog stopScan failed", it)
+        }
+        scanActive = false
+
+        mainHandler.postDelayed({
+            if (logger != null) {
+                val settings = ScanSettings.Builder()
+                    .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                    .setReportDelay(0)
+                    .build()
+                runCatching {
+                    scanner.startScan(null, settings, callback)
+                    scanActive = true
+                    scheduleWatchdogRestart()
+                    Log.i(TAG, "Watchdog BluetoothLeScanner.startScan called")
+                    publishStatus("Scan BLE relance")
+                }.onFailure {
+                    Log.e(TAG, "watchdog startScan failed", it)
+                    publishStatus("Relance anti-throttle impossible: ${it.javaClass.simpleName}")
+                    stopScanning()
+                }
+            }
+        }, WATCHDOG_RESTART_GAP_MS)
+    }
+
+    private fun scheduleWatchdogRestart() {
+        mainHandler.removeCallbacks(watchdogRestart)
+        mainHandler.postDelayed(watchdogRestart, WATCHDOG_RESTART_INTERVAL_MS)
+    }
+
+    private fun cancelWatchdogRestart() {
+        mainHandler.removeCallbacks(watchdogRestart)
     }
 
     private fun hasScanPermission(): Boolean {
@@ -143,10 +208,18 @@ class BleScanService : Service() {
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
             .setContentTitle("BLE Scanner Logger")
             .setContentText(text)
+            .setWhen(System.currentTimeMillis() - elapsedSinceScanStartMs())
+            .setUsesChronometer(scanStartedAtElapsedMs != 0L)
             .setOngoing(true)
             .build()
 
-    private fun publishPreview(preview: com.example.blescanner.data.ScanPreview) {
+    private fun elapsedSinceScanStartMs(): Long {
+        val startedAt = scanStartedAtElapsedMs
+        if (startedAt == 0L) return 0L
+        return (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
+    }
+
+    private fun publishPreview(preview: com.anezium.blescanner.data.ScanPreview) {
         val intent = Intent(ACTION_SCAN_RESULT)
             .setPackage(packageName)
             .putExtra(EXTRA_PREVIEW_LINE, preview.displayLine())
@@ -167,9 +240,11 @@ class BleScanService : Service() {
         private const val TAG = "BLE_SCANNER_APP"
         @Volatile
         var liveListener: ((Intent) -> Unit)? = null
-        const val ACTION_STOP = "com.example.blescanner.STOP"
-        const val ACTION_SCAN_RESULT = "com.example.blescanner.SCAN_RESULT"
-        const val ACTION_SCAN_STATUS = "com.example.blescanner.SCAN_STATUS"
+        @Volatile
+        var scanStartedAtElapsedMs: Long = 0L
+        const val ACTION_STOP = "com.anezium.blescanner.STOP"
+        const val ACTION_SCAN_RESULT = "com.anezium.blescanner.SCAN_RESULT"
+        const val ACTION_SCAN_STATUS = "com.anezium.blescanner.SCAN_STATUS"
         const val EXTRA_PREVIEW_LINE = "preview_line"
         const val EXTRA_PREVIEW_ADDRESS = "preview_address"
         const val EXTRA_PREVIEW_RSSI = "preview_rssi"
@@ -177,5 +252,7 @@ class BleScanService : Service() {
         const val EXTRA_STATUS_MESSAGE = "status_message"
         private const val CHANNEL_ID = "ble_scan"
         private const val NOTIFICATION_ID = 1001
+        private const val WATCHDOG_RESTART_INTERVAL_MS = 270_000L
+        private const val WATCHDOG_RESTART_GAP_MS = 250L
     }
 }

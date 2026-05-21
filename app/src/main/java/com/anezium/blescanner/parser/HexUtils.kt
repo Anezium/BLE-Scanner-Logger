@@ -1,4 +1,4 @@
-package com.example.blescanner.parser
+package com.anezium.blescanner.parser
 
 object HexUtils {
     private val hex = "0123456789ABCDEF".toCharArray()

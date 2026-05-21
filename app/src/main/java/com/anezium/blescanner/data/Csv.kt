@@ -1,4 +1,4 @@
-package com.example.blescanner.data
+package com.anezium.blescanner.data
 
 object Csv {
     fun row(values: List<Any?>): String = values.joinToString(",") { escape(it?.toString().orEmpty()) }

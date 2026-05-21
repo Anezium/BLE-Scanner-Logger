@@ -1,4 +1,4 @@
-package com.example.blescanner.data
+package com.anezium.blescanner.data
 
 import java.io.File
 import java.io.FileOutputStream

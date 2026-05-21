@@ -1,4 +1,4 @@
-package com.example.blescanner.parser
+package com.anezium.blescanner.parser
 
 import android.bluetooth.le.ScanRecord
 import android.os.ParcelUuid

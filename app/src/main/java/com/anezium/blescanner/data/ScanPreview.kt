@@ -1,4 +1,4 @@
-package com.example.blescanner.data
+package com.anezium.blescanner.data
 
 data class ScanPreview(
     val address: String,

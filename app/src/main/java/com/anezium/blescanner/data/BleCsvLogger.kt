@@ -1,10 +1,10 @@
-package com.example.blescanner.data
+package com.anezium.blescanner.data
 
 import android.bluetooth.le.ScanResult
 import android.content.Context
 import android.os.Environment
-import com.example.blescanner.parser.BeaconParser
-import com.example.blescanner.parser.HexUtils
+import com.anezium.blescanner.parser.BeaconParser
+import com.anezium.blescanner.parser.HexUtils
 import java.io.File
 import java.time.Instant
 import java.time.ZoneId
@@ -86,7 +86,7 @@ class BleCsvLogger(
     private fun localIso(epochMs: Long): String =
         DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(Instant.ofEpochMilli(epochMs).atZone(ZoneId.systemDefault()))
 
-    private fun parserLabel(parsed: com.example.blescanner.parser.ParsedAdvertising): String =
+    private fun parserLabel(parsed: com.anezium.blescanner.parser.ParsedAdvertising): String =
         when {
             parsed.datiRoom.isNotBlank() -> "DATI ${parsed.datiRoom}"
             parsed.iBeaconUuid.isNotBlank() -> "iBeacon ${parsed.iBeaconMajor}/${parsed.iBeaconMinor}"
@@ -95,7 +95,7 @@ class BleCsvLogger(
             else -> parsed.beaconKey
         }
 
-    private fun parserCategory(parsed: com.example.blescanner.parser.ParsedAdvertising): String =
+    private fun parserCategory(parsed: com.anezium.blescanner.parser.ParsedAdvertising): String =
         when {
             parsed.datiRoom.isNotBlank() -> "dati"
             parsed.iBeaconUuid.isNotBlank() -> "ibeacon"

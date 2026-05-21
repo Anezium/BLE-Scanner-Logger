@@ -1,4 +1,4 @@
-package com.example.blescanner.parser
+package com.anezium.blescanner.parser
 
 data class ParsedAdvertising(
     val beaconKey: String,

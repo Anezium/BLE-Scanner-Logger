@@ -1,4 +1,4 @@
-package com.example.blescanner
+package com.anezium.blescanner
 
 import android.Manifest
 import android.app.AlertDialog
@@ -18,14 +18,19 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
+import android.text.Editable
 import android.text.TextUtils
+import android.text.TextWatcher
 import android.util.Log
 import android.view.Gravity
 import android.view.View
+import android.view.WindowInsets
 import android.window.OnBackInvokedCallback
 import android.window.OnBackInvokedDispatcher
 import android.widget.Button
 import android.widget.CheckBox
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -33,7 +38,7 @@ import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
-import com.example.blescanner.ble.BleScanService
+import com.anezium.blescanner.ble.BleScanService
 import java.io.File
 import java.time.Instant
 import java.time.ZoneId
@@ -44,6 +49,7 @@ class MainActivity : android.app.Activity() {
     private lateinit var statusView: TextView
     private lateinit var countView: TextView
     private lateinit var uniqueView: TextView
+    private lateinit var elapsedView: TextView
     private lateinit var emptyLogView: TextView
     private lateinit var logList: LinearLayout
     private lateinit var startButton: Button
@@ -53,6 +59,7 @@ class MainActivity : android.app.Activity() {
     private lateinit var iBeaconFilter: CheckBox
     private lateinit var datiFilter: CheckBox
     private lateinit var eddystoneFilter: CheckBox
+    private lateinit var macFilterInput: EditText
     private lateinit var fileSelectionInfoView: TextView
     private lateinit var selectAllFilesButton: Button
     private lateinit var exportFilesButton: Button
@@ -74,6 +81,15 @@ class MainActivity : android.app.Activity() {
     @Volatile
     private var liveRenderScheduled = false
 
+    private val chronometerTick = object : Runnable {
+        override fun run() {
+            renderChronometer()
+            if (currentScreen == Screen.MAIN && BleScanService.scanStartedAtElapsedMs != 0L) {
+                mainHandler.postDelayed(this, CHRONOMETER_INTERVAL_MS)
+            }
+        }
+    }
+
     private val scanReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             handleLiveIntent(intent)
@@ -93,6 +109,7 @@ class MainActivity : android.app.Activity() {
 
     override fun onStart() {
         super.onStart()
+        syncScanStateFromService()
         BleScanService.liveListener = { intent ->
             handleLiveIntent(intent)
         }
@@ -109,6 +126,7 @@ class MainActivity : android.app.Activity() {
 
     override fun onStop() {
         BleScanService.liveListener = null
+        mainHandler.removeCallbacks(chronometerTick)
         unregisterReceiver(scanReceiver)
         super.onStop()
     }
@@ -199,7 +217,7 @@ class MainActivity : android.app.Activity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Colors.surface)
-            setPadding(dp(18), dp(24), dp(18), dp(18))
+            applyScreenPadding(this)
         }
 
         root.addView(header(), matchWrap())
@@ -280,12 +298,15 @@ class MainActivity : android.app.Activity() {
                     typeface = Typeface.DEFAULT_BOLD
                     setTextColor(Colors.text)
                 }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-                addView(TextView(context).apply {
-                    text = "live"
+                elapsedView = TextView(context).apply {
+                    text = "00:00:00"
                     textSize = 12f
                     typeface = Typeface.DEFAULT_BOLD
                     setTextColor(Colors.accent)
-                })
+                    background = rounded(Colors.accentSoft, dp(999), Colors.accentLine)
+                    setPadding(dp(10), dp(4), dp(10), dp(4))
+                }
+                addView(elapsedView)
             })
             addView(separator())
             addView(ScrollView(context).apply {
@@ -308,7 +329,7 @@ class MainActivity : android.app.Activity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Colors.surface)
-            setPadding(dp(18), dp(24), dp(18), dp(18))
+            applyScreenPadding(this)
         }
         root.addView(pageHeader("Fichiers logs", "Retour") { showMainPage() }, matchWrap())
         val directory = logDirectory()
@@ -607,7 +628,7 @@ class MainActivity : android.app.Activity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Colors.surface)
-            setPadding(dp(18), dp(24), dp(18), dp(18))
+            applyScreenPadding(this)
         }
         root.addView(pageHeader("Lecture CSV", "Fichiers") { showFileListPage() }, matchWrap())
         root.addView(TextView(this).apply {
@@ -659,6 +680,37 @@ class MainActivity : android.app.Activity() {
                 addView(datiFilter, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
                 addView(eddystoneFilter, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             }, matchWrap(top = 6))
+            addView(TextView(context).apply {
+                text = "Adresse MAC"
+                textSize = 12f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(Colors.muted)
+            }, matchWrap(top = 10))
+            macFilterInput = EditText(context).apply {
+                hint = "AA:BB:CC:DD:EE:FF"
+                setSingleLine(true)
+                textSize = 13f
+                typeface = Typeface.MONOSPACE
+                setTextColor(Colors.text)
+                setHintTextColor(Colors.muted)
+                inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                    android.text.InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS or
+                    android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                background = rounded(Colors.control, dp(10), Colors.line)
+                setPadding(dp(10), 0, dp(10), 0)
+                addTextChangedListener(object : TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                        currentFilePage = 0
+                        renderFilePage()
+                    }
+                    override fun afterTextChanged(s: Editable?) = Unit
+                })
+            }
+            addView(macFilterInput, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(44)
+            ).apply { topMargin = dp(6) })
         }
 
     private fun parserCheckBox(label: String): CheckBox =
@@ -741,16 +793,28 @@ class MainActivity : android.app.Activity() {
         ParserFilters(
             iBeacon = ::iBeaconFilter.isInitialized && iBeaconFilter.isChecked,
             dati = ::datiFilter.isInitialized && datiFilter.isChecked,
-            eddystone = ::eddystoneFilter.isInitialized && eddystoneFilter.isChecked
+            eddystone = ::eddystoneFilter.isInitialized && eddystoneFilter.isChecked,
+            macAddress = if (::macFilterInput.isInitialized) macFilterInput.text?.toString().orEmpty() else ""
         )
 
     private fun matchesParserFilters(values: List<String>, indexes: Map<String, Int>, filters: ParserFilters): Boolean {
-        if (!filters.anyEnabled()) return true
+        if (!matchesMacFilter(values, indexes, filters.macAddress)) return false
+        if (!filters.parserEnabled()) return true
         val classification = classifyCsvRow(values, indexes)
         return (filters.iBeacon && classification == "iBeacon") ||
             (filters.dati && classification == "DATI") ||
             (filters.eddystone && classification.startsWith("Eddystone"))
     }
+
+    private fun matchesMacFilter(values: List<String>, indexes: Map<String, Int>, query: String): Boolean {
+        val normalizedQuery = normalizeMacFilter(query)
+        if (normalizedQuery.isBlank()) return true
+        val normalizedAddress = normalizeMacFilter(value(values, indexes, "address"))
+        return normalizedAddress.contains(normalizedQuery)
+    }
+
+    private fun normalizeMacFilter(value: String): String =
+        value.filter { it.isLetterOrDigit() }.uppercase(Locale.US)
 
     private fun formatCsvPreview(values: List<String>, indexes: Map<String, Int>): String {
         val type = classifyCsvRow(values, indexes)
@@ -857,6 +921,9 @@ class MainActivity : android.app.Activity() {
             return
         }
         val intent = Intent(this, BleScanService::class.java)
+        if (BleScanService.scanStartedAtElapsedMs == 0L) {
+            BleScanService.scanStartedAtElapsedMs = SystemClock.elapsedRealtime()
+        }
         ContextCompat.startForegroundService(this, intent)
         updateScanState(true, "Scan actif")
         clearVisibleLogs()
@@ -868,6 +935,7 @@ class MainActivity : android.app.Activity() {
         addLiveLine("SYSTEM  Arrêt demandé", "system")
         val intent = Intent(this, BleScanService::class.java).setAction(BleScanService.ACTION_STOP)
         startService(intent)
+        BleScanService.scanStartedAtElapsedMs = 0L
         updateScanState(false, "Arrêté")
     }
 
@@ -888,8 +956,47 @@ class MainActivity : android.app.Activity() {
         uniqueView.text = "${snapshot.second}\nappareils"
     }
 
+    private fun syncScanStateFromService() {
+        val serviceScanning = BleScanService.scanStartedAtElapsedMs != 0L
+        if (serviceScanning != isScanning && ::statusView.isInitialized) {
+            updateScanState(serviceScanning, if (serviceScanning) "Scan actif" else "Prêt")
+        }
+        renderChronometer()
+        scheduleChronometerTick()
+    }
+
+    private fun renderChronometer() {
+        if (!::elapsedView.isInitialized) return
+        val startedAt = BleScanService.scanStartedAtElapsedMs
+        val elapsedMs = if (startedAt == 0L) 0L else SystemClock.elapsedRealtime() - startedAt
+        elapsedView.text = formatElapsed(elapsedMs.coerceAtLeast(0L))
+        elapsedView.setTextColor(if (startedAt == 0L) Colors.muted else Colors.accent)
+        elapsedView.background = rounded(
+            if (startedAt == 0L) Colors.control else Colors.accentSoft,
+            dp(999),
+            if (startedAt == 0L) Colors.line else Colors.accentLine
+        )
+    }
+
+    private fun scheduleChronometerTick() {
+        mainHandler.removeCallbacks(chronometerTick)
+        if (currentScreen == Screen.MAIN && BleScanService.scanStartedAtElapsedMs != 0L) {
+            mainHandler.postDelayed(chronometerTick, CHRONOMETER_INTERVAL_MS)
+        }
+    }
+
+    private fun formatElapsed(elapsedMs: Long): String {
+        val totalSeconds = elapsedMs / 1000L
+        val hours = totalSeconds / 3600L
+        val minutes = (totalSeconds % 3600L) / 60L
+        val seconds = totalSeconds % 60L
+        return String.format(Locale.US, "%02d:%02d:%02d", hours, minutes, seconds)
+    }
+
     private fun updateScanState(scanning: Boolean, label: String) {
         isScanning = scanning
+        renderChronometer()
+        scheduleChronometerTick()
         statusView.text = label
         statusView.setTextColor(if (scanning) Colors.accent else Colors.success)
         statusView.background = rounded(
@@ -994,6 +1101,37 @@ class MainActivity : android.app.Activity() {
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1))
         }
 
+    private fun applyScreenPadding(view: View) {
+        val horizontal = dp(18)
+        val fallbackTop = dp(24)
+        val fallbackBottom = dp(18)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            view.setOnApplyWindowInsetsListener { target, insets ->
+                val systemBars = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    insets.getInsets(WindowInsets.Type.systemBars())
+                } else {
+                    @Suppress("DEPRECATION")
+                    android.graphics.Insets.of(
+                        insets.systemWindowInsetLeft,
+                        insets.systemWindowInsetTop,
+                        insets.systemWindowInsetRight,
+                        insets.systemWindowInsetBottom
+                    )
+                }
+                target.setPadding(
+                    horizontal + systemBars.left,
+                    dp(12) + systemBars.top,
+                    horizontal + systemBars.right,
+                    fallbackBottom + systemBars.bottom
+                )
+                insets
+            }
+            view.requestApplyInsets()
+        } else {
+            view.setPadding(horizontal, fallbackTop, horizontal, fallbackBottom)
+        }
+    }
+
     private fun matchWrap(top: Int = 0): LinearLayout.LayoutParams =
         LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
@@ -1041,10 +1179,10 @@ class MainActivity : android.app.Activity() {
 
     private fun renderLiveNow() {
         liveRenderScheduled = false
-        mainHandler.removeCallbacksAndMessages(null)
         if (currentScreen != Screen.MAIN) return
         renderCounters()
         renderLogRows()
+        scheduleChronometerTick()
     }
 
     private fun renderLogRows() {
@@ -1097,9 +1235,10 @@ class MainActivity : android.app.Activity() {
     private data class ParserFilters(
         val iBeacon: Boolean,
         val dati: Boolean,
-        val eddystone: Boolean
+        val eddystone: Boolean,
+        val macAddress: String
     ) {
-        fun anyEnabled(): Boolean = iBeacon || dati || eddystone
+        fun parserEnabled(): Boolean = iBeacon || dati || eddystone
     }
 
     private enum class Screen {
@@ -1162,5 +1301,6 @@ class MainActivity : android.app.Activity() {
         private const val MAX_VISIBLE_LINES = 200
         private const val FILE_PAGE_SIZE = 200
         private const val LIVE_RENDER_INTERVAL_MS = 500L
+        private const val CHRONOMETER_INTERVAL_MS = 1_000L
     }
 }

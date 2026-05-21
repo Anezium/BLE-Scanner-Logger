@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "com.example.blescanner"
+    namespace = "com.anezium.blescanner"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.example.blescanner"
+        applicationId = "com.anezium.blescanner"
         minSdk = 26
         targetSdk = 36
         versionCode = 1
