@@ -39,6 +39,7 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import com.anezium.blescanner.ble.BleScanService
+import com.anezium.blescanner.cell.CellularScanService
 import java.io.File
 import java.time.Instant
 import java.time.ZoneId
@@ -54,6 +55,8 @@ class MainActivity : android.app.Activity() {
     private lateinit var logList: LinearLayout
     private lateinit var startButton: Button
     private lateinit var stopButton: Button
+    private lateinit var cellStartButton: Button
+    private lateinit var cellStopButton: Button
     private lateinit var fileContentView: TextView
     private lateinit var filePageInfoView: TextView
     private lateinit var iBeaconFilter: CheckBox
@@ -77,6 +80,7 @@ class MainActivity : android.app.Activity() {
     private var scanCount = 0
     private var isScanning = false
     private var startAfterPermissionGrant = false
+    private var pendingScanMode: String? = null
     private var backCallback: Any? = null
     @Volatile
     private var liveRenderScheduled = false
@@ -84,7 +88,7 @@ class MainActivity : android.app.Activity() {
     private val chronometerTick = object : Runnable {
         override fun run() {
             renderChronometer()
-            if (currentScreen == Screen.MAIN && BleScanService.scanStartedAtElapsedMs != 0L) {
+            if (currentScreen == Screen.MAIN && activeScanStartedAtElapsedMs() != 0L) {
                 mainHandler.postDelayed(this, CHRONOMETER_INTERVAL_MS)
             }
         }
@@ -113,9 +117,14 @@ class MainActivity : android.app.Activity() {
         BleScanService.liveListener = { intent ->
             handleLiveIntent(intent)
         }
+        CellularScanService.liveListener = { intent ->
+            handleLiveIntent(intent)
+        }
         val filter = IntentFilter().apply {
             addAction(BleScanService.ACTION_SCAN_RESULT)
             addAction(BleScanService.ACTION_SCAN_STATUS)
+            addAction(CellularScanService.ACTION_CELL_RESULT)
+            addAction(CellularScanService.ACTION_CELL_STATUS)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(scanReceiver, filter, RECEIVER_NOT_EXPORTED)
@@ -126,6 +135,7 @@ class MainActivity : android.app.Activity() {
 
     override fun onStop() {
         BleScanService.liveListener = null
+        CellularScanService.liveListener = null
         mainHandler.removeCallbacks(chronometerTick)
         unregisterReceiver(scanReceiver)
         super.onStop()
@@ -174,6 +184,19 @@ class MainActivity : android.app.Activity() {
                 val message = intent.getStringExtra(BleScanService.EXTRA_STATUS_MESSAGE) ?: return
                 addLiveLine("SYSTEM  $message", "system")
             }
+            CellularScanService.ACTION_CELL_RESULT -> {
+                val line = intent.getStringExtra(CellularScanService.EXTRA_PREVIEW_LINE) ?: return
+                val key = intent.getStringExtra(CellularScanService.EXTRA_PREVIEW_KEY).orEmpty()
+                synchronized(liveLock) {
+                    scanCount += 1
+                    if (key.isNotBlank()) uniqueAddresses += key
+                }
+                addLiveLine(line, "cell")
+            }
+            CellularScanService.ACTION_CELL_STATUS -> {
+                val message = intent.getStringExtra(CellularScanService.EXTRA_STATUS_MESSAGE) ?: return
+                addLiveLine("SYSTEM  $message", "system")
+            }
         }
     }
 
@@ -209,8 +232,10 @@ class MainActivity : android.app.Activity() {
             addView(emptyLogView)
         }
 
-        startButton = primaryButton("Start").apply { setOnClickListener { startScan() } }
-        stopButton = secondaryButton("Stop").apply { setOnClickListener { stopScan() } }
+        startButton = primaryButton("Start BLE").apply { setOnClickListener { startScan() } }
+        stopButton = secondaryButton("Stop BLE").apply { setOnClickListener { stopScan() } }
+        cellStartButton = primaryButton("Start cell").apply { setOnClickListener { startCellScan() } }
+        cellStopButton = secondaryButton("Stop cell").apply { setOnClickListener { stopCellScan() } }
         val files = secondaryButton("Fichiers").apply { setOnClickListener { showFileListPage() } }
         val clear = quietButton("Clear").apply { setOnClickListener { clearVisibleLogs() } }
 
@@ -221,7 +246,7 @@ class MainActivity : android.app.Activity() {
         }
 
         root.addView(header(), matchWrap())
-        root.addView(controlPanel(startButton, stopButton, files, clear), matchWrap(top = 20))
+        root.addView(controlPanel(startButton, stopButton, cellStartButton, cellStopButton, files, clear), matchWrap(top = 20))
         root.addView(metricsRow(), matchWrap(top = 16))
         root.addView(logPanel(), LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
@@ -229,7 +254,7 @@ class MainActivity : android.app.Activity() {
             1f
         ).apply { topMargin = dp(16) })
 
-        updateScanState(isScanning, if (isScanning) "Scan actif" else "Prêt")
+        updateScanState(isScanning, activeScanLabel())
         renderCounters()
         renderLogRows()
         return root
@@ -817,6 +842,25 @@ class MainActivity : android.app.Activity() {
         value.filter { it.isLetterOrDigit() }.uppercase(Locale.US)
 
     private fun formatCsvPreview(values: List<String>, indexes: Map<String, Int>): String {
+        if (indexes.containsKey("rat") && indexes.containsKey("rsrp_dbm") && indexes.containsKey("source")) {
+            val time = value(values, indexes, "wall_time_local")
+                .ifBlank { value(values, indexes, "wall_time_iso") }
+            val rat = value(values, indexes, "rat")
+            val source = value(values, indexes, "source")
+            val registered = value(values, indexes, "registered")
+            val rsrp = value(values, indexes, "rsrp_dbm")
+            val rsrq = value(values, indexes, "rsrq_db")
+            val sinr = value(values, indexes, "sinr_db")
+            val pci = value(values, indexes, "pci")
+            val ci = value(values, indexes, "ci").ifBlank { value(values, indexes, "nci") }
+            val arfcn = value(values, indexes, "arfcn")
+            val id = listOfNotNull(
+                ci.ifBlank { null }?.let { "ci=$it" },
+                pci.ifBlank { null }?.let { "pci=$it" },
+                arfcn.ifBlank { null }?.let { "arfcn=$it" }
+            ).joinToString(" ")
+            return "$time  $rat  registered=$registered  RSRP $rsrp dBm  RSRQ $rsrq  SINR $sinr\n$source  $id"
+        }
         val type = classifyCsvRow(values, indexes)
         val time = value(values, indexes, "wall_time_local")
             .ifBlank { value(values, indexes, "wall_time_iso") }
@@ -914,8 +958,13 @@ class MainActivity : android.app.Activity() {
 
     private fun startScan() {
         Log.i(TAG, "Start button pressed")
+        if (activeScanStartedAtElapsedMs() != 0L) {
+            addLiveLine("SYSTEM  Stoppe le scan actif avant d'en lancer un autre", "system")
+            return
+        }
         if (!hasRequiredPermissions()) {
             startAfterPermissionGrant = true
+            pendingScanMode = "ble"
             addLiveLine("SYSTEM  Permissions manquantes, ouverture de la demande Android", "system")
             requestNeededPermissions()
             return
@@ -939,6 +988,38 @@ class MainActivity : android.app.Activity() {
         updateScanState(false, "Arrêté")
     }
 
+    private fun startCellScan() {
+        Log.i(TAG, "Start cell button pressed")
+        if (activeScanStartedAtElapsedMs() != 0L) {
+            addLiveLine("SYSTEM  Stoppe le scan actif avant d'en lancer un autre", "system")
+            return
+        }
+        if (!hasRequiredPermissions()) {
+            startAfterPermissionGrant = true
+            pendingScanMode = "cell"
+            addLiveLine("SYSTEM  Permissions manquantes, ouverture de la demande Android", "system")
+            requestNeededPermissions()
+            return
+        }
+        val intent = Intent(this, CellularScanService::class.java)
+        if (CellularScanService.scanStartedAtElapsedMs == 0L) {
+            CellularScanService.scanStartedAtElapsedMs = SystemClock.elapsedRealtime()
+        }
+        ContextCompat.startForegroundService(this, intent)
+        updateScanState(true, "Scan cell actif")
+        clearVisibleLogs()
+        addLiveLine("SYSTEM  Demande de demarrage du scan cellulaire", "system")
+    }
+
+    private fun stopCellScan() {
+        Log.i(TAG, "Stop cell button pressed")
+        addLiveLine("SYSTEM  Arret cellulaire demande", "system")
+        val intent = Intent(this, CellularScanService::class.java).setAction(CellularScanService.ACTION_STOP)
+        startService(intent)
+        CellularScanService.scanStartedAtElapsedMs = 0L
+        updateScanState(false, "Arrete")
+    }
+
     private fun clearVisibleLogs() {
         synchronized(liveLock) {
             scanCount = 0
@@ -956,10 +1037,24 @@ class MainActivity : android.app.Activity() {
         uniqueView.text = "${snapshot.second}\nappareils"
     }
 
+    private fun activeScanStartedAtElapsedMs(): Long =
+        when {
+            BleScanService.scanStartedAtElapsedMs != 0L -> BleScanService.scanStartedAtElapsedMs
+            CellularScanService.scanStartedAtElapsedMs != 0L -> CellularScanService.scanStartedAtElapsedMs
+            else -> 0L
+        }
+
+    private fun activeScanLabel(): String =
+        when {
+            BleScanService.scanStartedAtElapsedMs != 0L -> "Scan BLE actif"
+            CellularScanService.scanStartedAtElapsedMs != 0L -> "Scan cell actif"
+            else -> "Pret"
+        }
+
     private fun syncScanStateFromService() {
-        val serviceScanning = BleScanService.scanStartedAtElapsedMs != 0L
+        val serviceScanning = activeScanStartedAtElapsedMs() != 0L
         if (serviceScanning != isScanning && ::statusView.isInitialized) {
-            updateScanState(serviceScanning, if (serviceScanning) "Scan actif" else "Prêt")
+            updateScanState(serviceScanning, activeScanLabel())
         }
         renderChronometer()
         scheduleChronometerTick()
@@ -967,7 +1062,7 @@ class MainActivity : android.app.Activity() {
 
     private fun renderChronometer() {
         if (!::elapsedView.isInitialized) return
-        val startedAt = BleScanService.scanStartedAtElapsedMs
+        val startedAt = activeScanStartedAtElapsedMs()
         val elapsedMs = if (startedAt == 0L) 0L else SystemClock.elapsedRealtime() - startedAt
         elapsedView.text = formatElapsed(elapsedMs.coerceAtLeast(0L))
         elapsedView.setTextColor(if (startedAt == 0L) Colors.muted else Colors.accent)
@@ -980,7 +1075,7 @@ class MainActivity : android.app.Activity() {
 
     private fun scheduleChronometerTick() {
         mainHandler.removeCallbacks(chronometerTick)
-        if (currentScreen == Screen.MAIN && BleScanService.scanStartedAtElapsedMs != 0L) {
+        if (currentScreen == Screen.MAIN && activeScanStartedAtElapsedMs() != 0L) {
             mainHandler.postDelayed(chronometerTick, CHRONOMETER_INTERVAL_MS)
         }
     }
@@ -1004,10 +1099,16 @@ class MainActivity : android.app.Activity() {
             dp(999),
             if (scanning) Colors.accentLine else Colors.successLine
         )
+        val bleActive = BleScanService.scanStartedAtElapsedMs != 0L
+        val cellActive = CellularScanService.scanStartedAtElapsedMs != 0L
         startButton.isEnabled = !scanning
-        stopButton.isEnabled = scanning
+        cellStartButton.isEnabled = !scanning
+        stopButton.isEnabled = bleActive
+        cellStopButton.isEnabled = cellActive
         startButton.alpha = if (scanning) 0.5f else 1f
-        stopButton.alpha = if (scanning) 1f else 0.55f
+        cellStartButton.alpha = if (scanning) 0.5f else 1f
+        stopButton.alpha = if (bleActive) 1f else 0.55f
+        cellStopButton.alpha = if (cellActive) 1f else 0.55f
     }
 
     private fun requestNeededPermissions() {
@@ -1029,11 +1130,14 @@ class MainActivity : android.app.Activity() {
         if (hasRequiredPermissions()) {
             addLiveLine("SYSTEM  Permissions accordées", "system")
             if (startAfterPermissionGrant) {
+                val mode = pendingScanMode
                 startAfterPermissionGrant = false
-                startScan()
+                pendingScanMode = null
+                if (mode == "cell") startCellScan() else startScan()
             }
         } else {
             startAfterPermissionGrant = false
+            pendingScanMode = null
             addLiveLine("SYSTEM  Autorisations incomplètes: active Bluetooth et Localisation précise", "system")
         }
     }
@@ -1047,7 +1151,9 @@ class MainActivity : android.app.Activity() {
             permissions += Manifest.permission.BLUETOOTH_SCAN
             permissions += Manifest.permission.BLUETOOTH_CONNECT
         }
+        permissions += Manifest.permission.ACCESS_COARSE_LOCATION
         permissions += Manifest.permission.ACCESS_FINE_LOCATION
+        permissions += Manifest.permission.READ_PHONE_STATE
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             permissions += Manifest.permission.POST_NOTIFICATIONS
         }
