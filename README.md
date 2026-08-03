@@ -29,25 +29,52 @@ Le fichier CSV brut est la source de verite. L'affichage live sert seulement au 
 
 ## Interface
 
-Ecran principal:
+L'interface est entièrement en français et construite en vues Android natives
+(aucun XML de layout, aucune bibliothèque d'UI tierce). Trois écrans, thème
+clair unique, accent teal `#147B6C`.
 
-- `Start`: démarre le scan.
-- `Stop`: arrête le scan et ferme proprement le fichier CSV.
-- `Fichiers`: ouvre la page des fichiers CSV locaux.
-- `Clear`: vide uniquement l'affichage live de l'application. Les fichiers CSV ne sont pas supprimés.
+### Écran principal
 
-Page fichiers:
+- En-tête: titre « BLE Scanner » et une pastille d'état: « Prêt », « Scan en
+  cours » ou « Arrêté ».
+- Carte « Scanner »:
+  - un sélecteur à deux choix, `Bluetooth` ou `Réseau mobile` (le choix est
+    mémorisé pendant la session, il est verrouillé pendant un scan);
+  - un seul gros bouton: `Démarrer le scan` (teal), qui devient
+    `Arrêter le scan` (rouge) pendant un scan. Le rouge n'est utilisé que pour
+    cette action.
+- Trois compteurs: nombre de trames reçues, nombre d'appareils distincts et
+  durée du scan en `HH:MM:SS`.
+- Panneau « Dernières trames »: les 200 dernières trames, la plus récente en
+  haut, chacune sur un fond coloré selon son type (BLE, iBeacon, Eddystone UID,
+  Eddystone TLM, DATI, réseau mobile, messages système). Un appui long sur une
+  ligne la copie dans le presse-papiers.
+- `Effacer`, en haut du panneau: vide uniquement l'affichage et les compteurs.
+  Les fichiers CSV ne sont pas supprimés.
+- `Fichiers CSV`, en bas: ouvre la page des fichiers, avec le nombre de fichiers
+  présents.
 
-- Liste les CSV présents sur le téléphone.
-- Ouvre un fichier pour le parcourir.
-- Affiche le chemin du dossier local dans un bloc compact.
-- Resume le nombre de fichiers, leur taille totale et le fichier le plus recent.
-- Sélection multiple des CSV.
-- `Exporter`: ouvre le partage Android pour envoyer/copier les CSV sélectionnés.
-- `Supprimer`: supprime les CSV sélectionnés après confirmation. La suppression est désactivée pendant un scan actif pour éviter de supprimer un fichier en cours d'écriture.
-- Le lecteur CSV affiche 200 lignes par page.
-- Les filtres `iBeacon`, `DATI`, `Eddystone` peuvent être cochés.
-- Si aucun filtre n'est coche, toutes les lignes du fichier sont affichees.
+### Page fichiers
+
+- Résumé sur une ligne: nombre de fichiers, taille totale et heure du dernier
+  fichier écrit, suivi du chemin du dossier local.
+- `Tout` / `Aucun`: sélectionne ou désélectionne tous les fichiers.
+- `Exporter`: ouvre le partage Android pour envoyer ou copier les CSV
+  sélectionnés.
+- `Supprimer`: supprime les CSV sélectionnés après confirmation. L'action est
+  désactivée pendant un scan actif (libellé « Stop requis ») pour éviter de
+  supprimer un fichier en cours d'écriture.
+- Liste des fichiers, du plus récent au plus ancien: un appui sur une ligne
+  ouvre le fichier, un appui long le sélectionne, la case à gauche fait de même.
+
+### Lecteur CSV
+
+- Filtres `iBeacon`, `DATI`, `Eddystone` sous forme de pastilles à cocher. Si
+  aucun filtre n'est coché, toutes les lignes du fichier sont affichées.
+- Champ `Adresse MAC`: filtre les lignes dont l'adresse contient la valeur
+  saisie (séparateurs et casse ignorés).
+- Pagination de 200 lignes par page, avec `Précédent` et `Suivant`.
+- Le contenu affiché est sélectionnable pour copier-coller.
 
 ## Permissions Android
 
@@ -61,6 +88,8 @@ L'application demande les permissions necessaires selon la version Android:
 - `FOREGROUND_SERVICE_CONNECTED_DEVICE`
 
 La localisation précise est demandée car certains téléphones Android filtrent ou bloquent le scan BLE si elle est refusée.
+
+Au démarrage d'un scan, l'application vérifie aussi que le Bluetooth et la localisation de l'appareil sont activés (Android ne livre aucun résultat de scan BLE si la localisation système est éteinte, même avec toutes les permissions accordées). Si l'un des deux est éteint, un dialog système propose de l'activer en un tap, puis le scan démarre automatiquement. Si Play Services est absent, l'application ouvre directement l'écran de réglages concerné.
 
 ## Schema CSV brut
 

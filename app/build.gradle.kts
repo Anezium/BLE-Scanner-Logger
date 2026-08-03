@@ -29,4 +29,6 @@ kotlin {
 
 dependencies {
     implementation("androidx.core:core-ktx:1.17.0")
+    // Dialog système « activer la localisation » en un tap (SettingsClient).
+    implementation("com.google.android.gms:play-services-location:21.3.0")
 }
