@@ -22,6 +22,7 @@ import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import com.anezium.blescanner.capture.SessionId
 import com.anezium.blescanner.data.CellularCsvLogger
 
 class CellularScanService : Service() {
@@ -61,7 +62,9 @@ class CellularScanService : Service() {
         Log.i(TAG, "onStartCommand action=${intent?.action}")
         when (intent?.action) {
             ACTION_STOP -> stopScanning()
-            else -> startScanning()
+            else -> startScanning(
+                intent?.getStringExtra(EXTRA_SESSION_ID)?.takeIf { it.isNotBlank() } ?: SessionId.now()
+            )
         }
         return START_STICKY
     }
@@ -74,19 +77,19 @@ class CellularScanService : Service() {
     }
 
     @SuppressLint("MissingPermission")
-    private fun startScanning() {
+    private fun startScanning(sessionId: String) {
         if (!hasCellPermissions()) {
             publishStatus("Permissions cellulaire/localisation manquantes")
             stopSelf()
             return
         }
         if (scanStartedAtElapsedMs == 0L) scanStartedAtElapsedMs = SystemClock.elapsedRealtime()
-        startForeground(NOTIFICATION_ID, notification("Scan cellulaire en cours"))
+        startForeground(NOTIFICATION_ID, notification("Capture réseau mobile en cours"))
         if (logger != null) return
 
         val manager = getSystemService(TELEPHONY_SERVICE) as TelephonyManager
         telephony = manager
-        logger = CellularCsvLogger(applicationContext)
+        logger = CellularCsvLogger(applicationContext, sessionId)
         val thread = HandlerThread("CellularOemSignalPoller").also { it.start() }
         oemHandlerThread = thread
         oemHandler = Handler(thread.looper)
@@ -94,7 +97,7 @@ class CellularScanService : Service() {
         requestFreshCellInfo()
         oemHandler?.post(refreshOemSignalStrength)
         mainHandler.postDelayed(refreshCellInfo, CELL_INFO_REFRESH_MS)
-        publishStatus("Scan cellulaire demarre")
+        publishStatus("Capture réseau mobile démarrée")
     }
 
     @SuppressLint("MissingPermission")
@@ -300,6 +303,7 @@ class CellularScanService : Service() {
         const val EXTRA_PREVIEW_KEY = "preview_key"
         const val EXTRA_PREVIEW_CATEGORY = "preview_category"
         const val EXTRA_STATUS_MESSAGE = "status_message"
+        const val EXTRA_SESSION_ID = "session_id"
         private const val CHANNEL_ID = "cellular_scan"
         private const val NOTIFICATION_ID = 1002
         private const val CELL_INFO_REFRESH_MS = 2_000L

@@ -7,6 +7,9 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- Permission normale (à l'installation) satisfaisant le prérequis Android 14+ du type
+         connectedDevice lorsqu'une session IMU seule démarre sans permission Bluetooth. -->
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -40,7 +43,7 @@
         </activity>
 
         <service
-            android:name=".ble.BleScanService"
+            android:name=".capture.CaptureService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
 

@@ -22,7 +22,11 @@ import android.view.View
 import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import com.anezium.blescanner.ble.BleScanService
+import com.anezium.blescanner.capture.CaptureService
+import com.anezium.blescanner.capture.CaptureSource
+import com.anezium.blescanner.capture.SessionId
+import com.anezium.blescanner.capture.keys
+import com.anezium.blescanner.capture.label
 import com.anezium.blescanner.cell.CellularScanService
 import com.anezium.blescanner.ui.*
 import com.google.android.gms.common.api.ResolvableApiException
@@ -50,10 +54,10 @@ class MainActivity : android.app.Activity() {
     @Volatile
     private var currentScreen = Screen.MAIN
     private var isScanning = false
-    private var scanMode = ScanMode.BLE
+    private val selectedSources = mutableSetOf<CaptureSource>()
     private var scanStatus = ScanStatus.READY
     private var startAfterPermissionGrant = false
-    private var pendingScanMode: ScanMode? = null
+    private var pendingSources: Set<CaptureSource>? = null
     private var backCallback: Any? = null
 
     private val liveFeed = LiveFeedBuffer(
@@ -100,18 +104,19 @@ class MainActivity : android.app.Activity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             backCallback = BackNavigationApi33.register(this) { handleBackNavigation() }
         }
+        loadSelectedSources()
         showMainPage()
-        requestNeededPermissions()
+        requestNeededPermissions(selectedSources.toSet())
     }
 
     override fun onStart() {
         super.onStart()
         syncScanStateFromService()
-        BleScanService.liveListener = { intent -> handleLiveIntent(intent) }
+        CaptureService.liveListener = { intent -> handleLiveIntent(intent) }
         CellularScanService.liveListener = { intent -> handleLiveIntent(intent) }
         val filter = IntentFilter().apply {
-            addAction(BleScanService.ACTION_SCAN_RESULT)
-            addAction(BleScanService.ACTION_SCAN_STATUS)
+            addAction(CaptureService.ACTION_SCAN_RESULT)
+            addAction(CaptureService.ACTION_SCAN_STATUS)
             addAction(CellularScanService.ACTION_CELL_RESULT)
             addAction(CellularScanService.ACTION_CELL_STATUS)
         }
@@ -123,7 +128,7 @@ class MainActivity : android.app.Activity() {
     }
 
     override fun onStop() {
-        BleScanService.liveListener = null
+        CaptureService.liveListener = null
         CellularScanService.liveListener = null
         mainHandler.removeCallbacks(chronometerTick)
         liveFeed.cancelPendingFlush()
@@ -165,7 +170,7 @@ class MainActivity : android.app.Activity() {
         liveFeed.copyToVisible()
         val views = buildMainScreen(
             liveLines = liveFeed.visible,
-            onModeSelected = ::selectMode,
+            onSourceToggled = ::toggleSource,
             onToggleScan = ::toggleScan,
             onClear = ::clearVisibleLogs,
             onOpenFiles = ::showFileListPage,
@@ -174,8 +179,8 @@ class MainActivity : android.app.Activity() {
         mainViews = views
         setContentView(views.root)
         views.renderStatus(scanStatus)
-        views.renderMode(scanMode, !isScanning)
-        views.renderAction(isScanning)
+        views.renderSources(selectedSources, !isScanning)
+        views.renderAction(isScanning, selectedSources.isNotEmpty())
         views.setEmptyText(emptyFeedText())
         views.renderFileCount(filesController.csvCount())
         renderCounters()
@@ -227,15 +232,15 @@ class MainActivity : android.app.Activity() {
 
     private fun handleLiveIntent(intent: Intent?) {
         when (intent?.action) {
-            BleScanService.ACTION_SCAN_RESULT -> {
-                val line = intent.getStringExtra(BleScanService.EXTRA_PREVIEW_LINE) ?: return
-                val address = intent.getStringExtra(BleScanService.EXTRA_PREVIEW_ADDRESS).orEmpty()
-                val category = intent.getStringExtra(BleScanService.EXTRA_PREVIEW_CATEGORY) ?: "ble"
+            CaptureService.ACTION_SCAN_RESULT -> {
+                val line = intent.getStringExtra(CaptureService.EXTRA_PREVIEW_LINE) ?: return
+                val address = intent.getStringExtra(CaptureService.EXTRA_PREVIEW_ADDRESS).orEmpty()
+                val category = intent.getStringExtra(CaptureService.EXTRA_PREVIEW_CATEGORY) ?: "ble"
                 liveFeed.countFrame(address)
                 liveFeed.add(line, category)
             }
-            BleScanService.ACTION_SCAN_STATUS -> {
-                val message = intent.getStringExtra(BleScanService.EXTRA_STATUS_MESSAGE) ?: return
+            CaptureService.ACTION_SCAN_STATUS -> {
+                val message = intent.getStringExtra(CaptureService.EXTRA_STATUS_MESSAGE) ?: return
                 liveFeed.add("SYSTEM  $message", "system")
             }
             CellularScanService.ACTION_CELL_RESULT -> {
@@ -265,7 +270,11 @@ class MainActivity : android.app.Activity() {
 
     private fun emptyFeedText(): String =
         if (isScanning) {
-            "En attente de trames..."
+            if (selectedSources == setOf(CaptureSource.IMU)) {
+                "IMU en cours d'enregistrement: les échantillons ne sont pas affichés en direct, voir le CSV."
+            } else {
+                "En attente de trames..."
+            }
         } else {
             "Appuie sur Démarrer pour voir les trames en direct."
         }
@@ -278,87 +287,107 @@ class MainActivity : android.app.Activity() {
 
     // --- Scan --------------------------------------------------------------
 
-    private fun selectMode(mode: ScanMode) {
+    private fun toggleSource(source: CaptureSource) {
         if (isScanning) return
-        scanMode = mode
-        mainViews?.renderMode(mode, true)
+        if (!selectedSources.add(source)) selectedSources.remove(source)
+        persistSelectedSources()
+        mainViews?.renderSources(selectedSources, true)
+        mainViews?.renderAction(false, selectedSources.isNotEmpty())
     }
 
     private fun toggleScan() {
         if (isScanning || activeScanStartedAtElapsedMs() != 0L) {
-            stopActiveScan()
+            stopActiveCapture()
         } else {
-            startScan(scanMode)
+            startCapture(selectedSources.toSet())
         }
     }
 
-    private fun startScan(mode: ScanMode) {
-        Log.i(TAG, "Start requested mode=$mode")
+    private fun startCapture(sources: Set<CaptureSource>) {
+        val requestedSources = sources.toSet()
+        Log.i(TAG, "Start requested sources=${requestedSources.keys()}")
+        if (requestedSources.isEmpty()) {
+            liveFeed.add("SYSTEM  Sélectionne au moins une source", "system")
+            return
+        }
         if (activeScanStartedAtElapsedMs() != 0L) {
             liveFeed.add("SYSTEM  Stoppe le scan actif avant d'en lancer un autre", "system")
             return
         }
-        if (!hasRequiredPermissions()) {
+        if (!hasRequiredPermissions(requestedSources)) {
             startAfterPermissionGrant = true
-            pendingScanMode = mode
+            pendingSources = requestedSources
             liveFeed.add("SYSTEM  Permissions manquantes, ouverture de la demande Android", "system")
-            requestNeededPermissions()
+            requestNeededPermissions(requestedSources)
             return
         }
-        if (mode == ScanMode.BLE && !isBluetoothEnabled()) {
-            pendingScanMode = mode
+        if (CaptureSource.BLE in requestedSources && !isBluetoothEnabled()) {
+            pendingSources = requestedSources
             liveFeed.add("SYSTEM  Bluetooth désactivé, demande d'activation", "system")
             requestEnableBluetooth()
             return
         }
-        if (!isLocationEnabled()) {
-            pendingScanMode = mode
+        if ((CaptureSource.BLE in requestedSources || CaptureSource.CELL in requestedSources) &&
+            !isLocationEnabled()
+        ) {
+            pendingSources = requestedSources
             liveFeed.add("SYSTEM  Localisation désactivée, demande d'activation (exigée par Android pour scanner)", "system")
             requestEnableLocation()
             return
         }
-        if (mode == ScanMode.BLE) {
-            if (BleScanService.scanStartedAtElapsedMs == 0L) {
-                BleScanService.scanStartedAtElapsedMs = SystemClock.elapsedRealtime()
+
+        pendingSources = null
+        startAfterPermissionGrant = false
+        val sessionId = SessionId.now()
+        val eventSources = requestedSources.filterTo(mutableSetOf()) {
+            it == CaptureSource.BLE || it == CaptureSource.IMU
+        }
+        if (eventSources.isNotEmpty()) {
+            if (CaptureService.scanStartedAtElapsedMs == 0L) {
+                CaptureService.scanStartedAtElapsedMs = SystemClock.elapsedRealtime()
             }
-            ContextCompat.startForegroundService(this, Intent(this, BleScanService::class.java))
-        } else {
+            CaptureService.activeSources = eventSources.toSet()
+            ContextCompat.startForegroundService(
+                this,
+                Intent(this, CaptureService::class.java)
+                    .putExtra(CaptureService.EXTRA_ENABLE_BLE, CaptureSource.BLE in eventSources)
+                    .putExtra(CaptureService.EXTRA_ENABLE_IMU, CaptureSource.IMU in eventSources)
+                    .putExtra(CaptureService.EXTRA_SESSION_ID, sessionId)
+            )
+        }
+        if (CaptureSource.CELL in requestedSources) {
             if (CellularScanService.scanStartedAtElapsedMs == 0L) {
                 CellularScanService.scanStartedAtElapsedMs = SystemClock.elapsedRealtime()
             }
-            ContextCompat.startForegroundService(this, Intent(this, CellularScanService::class.java))
+            ContextCompat.startForegroundService(
+                this,
+                Intent(this, CellularScanService::class.java)
+                    .putExtra(CellularScanService.EXTRA_SESSION_ID, sessionId)
+            )
         }
-        scanMode = mode
         updateScanState(true)
         clearVisibleLogs()
         liveFeed.add(
-            if (mode == ScanMode.BLE) {
-                "SYSTEM  Demande de démarrage du scan Bluetooth"
-            } else {
-                "SYSTEM  Demande de démarrage du scan réseau mobile"
-            },
+            "SYSTEM  Démarrage de la capture: ${requestedSources.label()} · session $sessionId",
             "system"
         )
     }
 
-    private fun stopActiveScan() {
-        val mode = when {
-            BleScanService.scanStartedAtElapsedMs != 0L -> ScanMode.BLE
-            CellularScanService.scanStartedAtElapsedMs != 0L -> ScanMode.CELL
-            else -> scanMode
-        }
-        Log.i(TAG, "Stop requested mode=$mode")
+    private fun stopActiveCapture() {
+        Log.i(TAG, "Stop requested")
         liveFeed.add("SYSTEM  Arrêt demandé", "system")
-        if (mode == ScanMode.BLE) {
-            startService(Intent(this, BleScanService::class.java).setAction(BleScanService.ACTION_STOP))
-            BleScanService.scanStartedAtElapsedMs = 0L
-        } else {
+        if (CaptureService.scanStartedAtElapsedMs != 0L) {
+            startService(Intent(this, CaptureService::class.java).setAction(CaptureService.ACTION_STOP))
+        }
+        if (CellularScanService.scanStartedAtElapsedMs != 0L) {
             startService(
                 Intent(this, CellularScanService::class.java)
                     .setAction(CellularScanService.ACTION_STOP)
             )
-            CellularScanService.scanStartedAtElapsedMs = 0L
         }
+        CaptureService.scanStartedAtElapsedMs = 0L
+        CaptureService.activeSources = emptySet()
+        CellularScanService.scanStartedAtElapsedMs = 0L
         updateScanState(false)
     }
 
@@ -371,8 +400,8 @@ class MainActivity : android.app.Activity() {
         }
         mainViews?.let { views ->
             views.renderStatus(scanStatus)
-            views.renderAction(scanning)
-            views.renderMode(scanMode, !scanning)
+            views.renderAction(scanning, selectedSources.isNotEmpty())
+            views.renderSources(selectedSources, !scanning)
             views.setEmptyText(emptyFeedText())
         }
         filesController.renderSelection()
@@ -381,25 +410,34 @@ class MainActivity : android.app.Activity() {
     }
 
     private fun syncScanStateFromService() {
-        val bleActive = BleScanService.scanStartedAtElapsedMs != 0L
+        val eventCaptureActive = CaptureService.scanStartedAtElapsedMs != 0L
         val cellActive = CellularScanService.scanStartedAtElapsedMs != 0L
-        val serviceScanning = bleActive || cellActive
-        if (serviceScanning) scanMode = if (bleActive) ScanMode.BLE else ScanMode.CELL
+        val serviceScanning = eventCaptureActive || cellActive
+        if (serviceScanning) {
+            val activeSources = buildSet {
+                addAll(CaptureService.activeSources)
+                if (cellActive) add(CaptureSource.CELL)
+            }
+            if (activeSources.isNotEmpty()) {
+                selectedSources.clear()
+                selectedSources.addAll(activeSources)
+            }
+        }
         if (serviceScanning != isScanning) {
             updateScanState(serviceScanning)
         } else {
-            mainViews?.renderMode(scanMode, !isScanning)
+            mainViews?.renderSources(selectedSources, !isScanning)
+            mainViews?.renderAction(isScanning, selectedSources.isNotEmpty())
+            mainViews?.setEmptyText(emptyFeedText())
         }
         renderChronometer()
         scheduleChronometerTick()
     }
 
-    private fun activeScanStartedAtElapsedMs(): Long =
-        when {
-            BleScanService.scanStartedAtElapsedMs != 0L -> BleScanService.scanStartedAtElapsedMs
-            CellularScanService.scanStartedAtElapsedMs != 0L -> CellularScanService.scanStartedAtElapsedMs
-            else -> 0L
-        }
+    private fun activeScanStartedAtElapsedMs(): Long = listOf(
+        CaptureService.scanStartedAtElapsedMs,
+        CellularScanService.scanStartedAtElapsedMs
+    ).filter { it != 0L }.minOrNull() ?: 0L
 
     private fun renderChronometer() {
         val views = mainViews ?: return
@@ -450,8 +488,8 @@ class MainActivity : android.app.Activity() {
 
     // --- Permissions -------------------------------------------------------
 
-    private fun requestNeededPermissions() {
-        val missing = permissionsToRequest().filter {
+    private fun requestNeededPermissions(sources: Set<CaptureSource>) {
+        val missing = permissionsToRequest(sources).filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
         if (missing.isNotEmpty()) {
@@ -466,8 +504,10 @@ class MainActivity : android.app.Activity() {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode != REQUEST_PERMISSIONS) return
-        if (hasRequiredPermissions()) {
-            val stepPermissionGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
+        val sources = (pendingSources ?: selectedSources).toSet()
+        if (hasRequiredPermissions(sources)) {
+            val stepPermissionGranted = CaptureSource.IMU !in sources ||
+                Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
                 ContextCompat.checkSelfPermission(
                     this,
                     Manifest.permission.ACTIVITY_RECOGNITION
@@ -481,48 +521,82 @@ class MainActivity : android.app.Activity() {
                 "system"
             )
             if (startAfterPermissionGrant) {
-                val mode = pendingScanMode ?: scanMode
+                val sourcesToStart = pendingSources ?: selectedSources.toSet()
                 startAfterPermissionGrant = false
-                pendingScanMode = null
-                startScan(mode)
+                pendingSources = null
+                startCapture(sourcesToStart)
             }
         } else {
             startAfterPermissionGrant = false
-            pendingScanMode = null
+            pendingSources = null
             liveFeed.add(
-                "SYSTEM  Autorisations incomplètes: active Bluetooth et Localisation précise",
+                incompletePermissionsMessage(sources),
                 "system"
             )
         }
     }
 
-    private fun hasRequiredPermissions(): Boolean =
-        requiredPermissions().all {
+    private fun hasRequiredPermissions(sources: Set<CaptureSource>): Boolean =
+        requiredPermissions(sources).all {
             ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
         }
 
-    private fun requiredPermissions(): List<String> {
-        val permissions = mutableListOf<String>()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            permissions += Manifest.permission.BLUETOOTH_SCAN
-            permissions += Manifest.permission.BLUETOOTH_CONNECT
+    private fun requiredPermissions(sources: Set<CaptureSource>): List<String> {
+        val permissions = linkedSetOf<String>()
+        if (CaptureSource.BLE in sources) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                permissions += Manifest.permission.BLUETOOTH_SCAN
+                permissions += Manifest.permission.BLUETOOTH_CONNECT
+            }
+            permissions += Manifest.permission.ACCESS_FINE_LOCATION
+            permissions += Manifest.permission.ACCESS_COARSE_LOCATION
         }
-        permissions += Manifest.permission.ACCESS_COARSE_LOCATION
-        permissions += Manifest.permission.ACCESS_FINE_LOCATION
-        permissions += Manifest.permission.READ_PHONE_STATE
+        if (CaptureSource.CELL in sources) {
+            permissions += Manifest.permission.READ_PHONE_STATE
+            permissions += Manifest.permission.ACCESS_FINE_LOCATION
+            permissions += Manifest.permission.ACCESS_COARSE_LOCATION
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             permissions += Manifest.permission.POST_NOTIFICATIONS
         }
-        return permissions
+        return permissions.toList()
     }
 
     /** La permission des pas est optionnelle: son refus ne bloque ni le BLE ni le reste de l'IMU. */
-    private fun permissionsToRequest(): List<String> =
-        requiredPermissions() + if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+    private fun permissionsToRequest(sources: Set<CaptureSource>): List<String> =
+        requiredPermissions(sources) + if (
+            CaptureSource.IMU in sources && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+        ) {
             listOf(Manifest.permission.ACTIVITY_RECOGNITION)
         } else {
             emptyList()
         }
+
+    private fun incompletePermissionsMessage(sources: Set<CaptureSource>): String {
+        val missing = requiredPermissions(sources).filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+        val needs = buildList {
+            if (missing.any {
+                    it == Manifest.permission.BLUETOOTH_SCAN ||
+                        it == Manifest.permission.BLUETOOTH_CONNECT
+                }
+            ) {
+                add("Bluetooth")
+            }
+            if (missing.any {
+                    it == Manifest.permission.ACCESS_FINE_LOCATION ||
+                        it == Manifest.permission.ACCESS_COARSE_LOCATION
+                }
+            ) {
+                add("Localisation précise")
+            }
+            if (Manifest.permission.READ_PHONE_STATE in missing) add("Téléphone")
+            if (Manifest.permission.POST_NOTIFICATIONS in missing) add("Notifications")
+        }
+        val details = needs.ifEmpty { listOf("autorisations Android") }.joinToString(", ")
+        return "SYSTEM  Autorisations incomplètes pour ${sources.label()}: $details"
+    }
 
     // --- Activation Bluetooth / localisation --------------------------------
 
@@ -562,7 +636,7 @@ class MainActivity : android.app.Activity() {
             .checkLocationSettings(settingsRequest)
             .addOnSuccessListener {
                 if (isLocationEnabled()) {
-                    resumePendingScan()
+                    resumePendingCapture()
                 } else {
                     openLocationSettingsFallback()
                 }
@@ -600,10 +674,10 @@ class MainActivity : android.app.Activity() {
         }
     }
 
-    private fun resumePendingScan() {
-        val mode = pendingScanMode ?: return
-        pendingScanMode = null
-        startScan(mode)
+    private fun resumePendingCapture() {
+        val sources = pendingSources ?: return
+        pendingSources = null
+        startCapture(sources)
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -612,22 +686,45 @@ class MainActivity : android.app.Activity() {
             REQUEST_ENABLE_BLUETOOTH -> {
                 if (resultCode == RESULT_OK || isBluetoothEnabled()) {
                     liveFeed.add("SYSTEM  Bluetooth activé", "system")
-                    resumePendingScan()
+                    resumePendingCapture()
                 } else {
-                    pendingScanMode = null
-                    liveFeed.add("SYSTEM  Scan annulé: le Bluetooth est nécessaire", "system")
+                    pendingSources = null
+                    liveFeed.add(
+                        "SYSTEM  Capture annulée: le Bluetooth est nécessaire pour la source Bluetooth",
+                        "system"
+                    )
                 }
             }
             REQUEST_ENABLE_LOCATION -> {
                 if (isLocationEnabled()) {
                     liveFeed.add("SYSTEM  Localisation activée", "system")
-                    resumePendingScan()
+                    resumePendingCapture()
                 } else {
-                    pendingScanMode = null
-                    liveFeed.add("SYSTEM  Scan annulé: Android exige la localisation pour scanner", "system")
+                    pendingSources = null
+                    liveFeed.add(
+                        "SYSTEM  Capture annulée: Android exige la localisation pour scanner",
+                        "system"
+                    )
                 }
             }
         }
+    }
+
+    private fun loadSelectedSources() {
+        val stored = getSharedPreferences(PREFERENCES_NAME, MODE_PRIVATE)
+            .getString(SOURCES_KEY, DEFAULT_SOURCES)
+            ?: DEFAULT_SOURCES
+        selectedSources.clear()
+        stored.split(',')
+            .mapNotNull { CaptureSource.fromKey(it.trim()) }
+            .forEach(selectedSources::add)
+    }
+
+    private fun persistSelectedSources() {
+        getSharedPreferences(PREFERENCES_NAME, MODE_PRIVATE)
+            .edit()
+            .putString(SOURCES_KEY, selectedSources.keys())
+            .apply()
     }
 
     private enum class Screen { MAIN, FILE_LIST, FILE_VIEWER }
@@ -637,6 +734,9 @@ class MainActivity : android.app.Activity() {
         private const val REQUEST_PERMISSIONS = 10
         private const val REQUEST_ENABLE_BLUETOOTH = 11
         private const val REQUEST_ENABLE_LOCATION = 12
+        private const val PREFERENCES_NAME = "capture"
+        private const val SOURCES_KEY = "sources"
+        private const val DEFAULT_SOURCES = "ble,imu"
         private const val MAX_VISIBLE_LINES = 200
         private const val LIVE_RENDER_INTERVAL_MS = 500L
         private const val CHRONOMETER_INTERVAL_MS = 1_000L

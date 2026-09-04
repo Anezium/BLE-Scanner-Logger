@@ -10,7 +10,7 @@ import android.hardware.SensorManager
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
-import com.anezium.blescanner.data.BleCsvLogger
+import com.anezium.blescanner.data.EventCsvLogger
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -18,7 +18,7 @@ import java.util.concurrent.TimeUnit
 /** Enregistre les capteurs utiles au PDR sur un thread dédié. */
 class ImuRecorder(
     context: Context,
-    private val logger: BleCsvLogger
+    private val logger: EventCsvLogger
 ) : SensorEventListener {
     private val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
     private val hasStepPermission = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
@@ -82,7 +82,7 @@ class ImuRecorder(
             }
         }
         return ImuStartResult(
-            active = registeredSensors.map { BleCsvLogger.sensorEventType(it.type) },
+            active = registeredSensors.map { EventCsvLogger.sensorEventType(it.type) },
             unavailable = unavailable,
             skipped = skipped
         )
@@ -128,7 +128,7 @@ class ImuRecorder(
     }
 
     private fun currentResult(): ImuStartResult = ImuStartResult(
-        active = registeredSensors.map { BleCsvLogger.sensorEventType(it.type) },
+        active = registeredSensors.map { EventCsvLogger.sensorEventType(it.type) },
         unavailable = emptyList(),
         skipped = emptyList()
     )

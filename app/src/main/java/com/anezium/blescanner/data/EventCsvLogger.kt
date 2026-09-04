@@ -8,6 +8,8 @@ import android.hardware.SensorManager
 import android.os.Build
 import android.os.Environment
 import android.os.SystemClock
+import com.anezium.blescanner.capture.CaptureSource
+import com.anezium.blescanner.capture.keys
 import com.anezium.blescanner.parser.BeaconParser
 import com.anezium.blescanner.parser.HexUtils
 import java.io.File
@@ -17,30 +19,31 @@ import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 
 /**
- * Journal événementiel unique de la session BLE + IMU.
+ * Journal événementiel d'une session Bluetooth et/ou IMU.
  *
- * Les lignes BLE et capteurs gardent leur cadence propre et partagent la même
- * base de temps monotone Android. Les champs non applicables restent vides.
+ * Les lignes Bluetooth et capteurs gardent leur cadence propre et partagent la
+ * même base de temps monotone Android. Les champs non applicables restent vides.
  */
-class BleCsvLogger(
-    private val context: Context
+class EventCsvLogger(
+    private val context: Context,
+    val sessionStamp: String,
+    sources: Set<CaptureSource>
 ) {
     val directory: File = File(context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS), "ble_logs")
-    val sessionStamp: String
     private val rawWriter: RotatingCsvWriter
     private var sequence = 0L
     private var closed = false
 
     init {
         directory.mkdirs()
-        sessionStamp = FILE_STAMP_FORMAT.format(Instant.now())
         rawWriter = RotatingCsvWriter(
             directory = directory,
-            baseName = "ble_imu_session_$sessionStamp",
+            baseName = "session_${sessionStamp}_events",
             header = RAW_HEADER
         )
         logSessionMetadata("session_state", "started")
         logSessionMetadata("format_version", FORMAT_VERSION)
+        logSessionMetadata("capture_sources", sources.keys())
         logSessionMetadata("device_manufacturer", Build.MANUFACTURER)
         logSessionMetadata("device_model", Build.MODEL)
         logSessionMetadata("device_product", Build.PRODUCT)
@@ -48,7 +51,9 @@ class BleCsvLogger(
         logSessionMetadata("android_release", Build.VERSION.RELEASE)
         logSessionMetadata("app_version", appVersion())
         logSessionMetadata("event_clock", "SystemClock.elapsedRealtimeNanos")
-        logSessionMetadata("sampling_profile", "accel=100Hz;gyro=100Hz;rotation=50Hz;mag=50Hz;pressure=10Hz")
+        if (CaptureSource.IMU in sources) {
+            logSessionMetadata("sampling_profile", "accel=100Hz;gyro=100Hz;rotation=50Hz;mag=50Hz;pressure=10Hz")
+        }
     }
 
     fun log(result: ScanResult): ScanPreview {
@@ -279,8 +284,6 @@ class BleCsvLogger(
     companion object {
         private const val FORMAT_VERSION = 2
         private const val NANOS_PER_MILLISECOND = 1_000_000L
-        private val FILE_STAMP_FORMAT =
-            DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSS").withZone(ZoneOffset.UTC)
 
         fun sensorEventType(type: Int): String = when (type) {
             Sensor.TYPE_ACCELEROMETER -> "accelerometer"

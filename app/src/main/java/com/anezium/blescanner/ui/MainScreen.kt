@@ -2,8 +2,11 @@ package com.anezium.blescanner.ui
 
 import android.content.Context
 import android.graphics.Color
+import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
+import android.graphics.drawable.GradientDrawable
+import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
@@ -11,12 +14,34 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
-
-/** Mode de scan sélectionné par l'utilisateur. */
-enum class ScanMode { BLE, CELL }
+import com.anezium.blescanner.capture.CaptureSource
 
 /** État affiché par la chip du header. */
 enum class ScanStatus { READY, RUNNING, STOPPED }
+
+/**
+ * Ligne cochable d'une source de capture. Le fond et la case sont des
+ * drawables mutables: l'état est appliqué sans réallocation.
+ */
+class SourceRow(
+    val root: LinearLayout,
+    private val checkView: TextView,
+    private val titleView: TextView
+) {
+    fun setState(active: Boolean, enabled: Boolean) {
+        (root.background as? GradientDrawable)?.apply {
+            setColor(if (active) Colors.accentSoft else Colors.control)
+            setStroke(root.context.strokeWidthPx(), if (active) Colors.accent else Colors.line)
+        }
+        (checkView.background as? GradientDrawable)?.apply {
+            setColor(if (active) Colors.accent else Colors.panel)
+            setStroke(root.context.strokeWidthPx(), if (active) Colors.accent else Colors.line)
+        }
+        checkView.setTextColor(if (active) Colors.onAccent else Color.TRANSPARENT)
+        titleView.setTextColor(if (active) Colors.accent else Colors.text)
+        root.setEnabledWithAlpha(enabled)
+    }
+}
 
 /**
  * Références de vues de l'écran principal. Toutes les mises à jour se font
@@ -28,11 +53,11 @@ class MainScreenViews(
     val liveList: ListView,
     val adapter: LiveFeedAdapter,
     private val statusChip: TextView,
-    private val bleSegment: Button,
-    private val cellSegment: Button,
+    private val sourceRows: Map<CaptureSource, SourceRow>,
     private val actionButton: Button,
     private val startBackground: Drawable,
     private val stopBackground: Drawable,
+    private val outputCaption: TextView,
     private val framesMetric: MetricCard,
     private val devicesMetric: MetricCard,
     private val elapsedMetric: MetricCard,
@@ -46,32 +71,35 @@ class MainScreenViews(
                 statusChip.setChipColors(Colors.successSoft, Colors.successLine, Colors.success)
             }
             ScanStatus.RUNNING -> {
-                statusChip.text = "Scan en cours"
+                statusChip.text = "Capture en cours"
                 statusChip.setChipColors(Colors.accentSoft, Colors.accentLine, Colors.accent)
             }
             ScanStatus.STOPPED -> {
-                statusChip.text = "Arrêté"
+                statusChip.text = "Arrêtée"
                 statusChip.setChipColors(Colors.control, Colors.line, Colors.muted)
             }
         }
     }
 
-    fun renderMode(mode: ScanMode, enabled: Boolean) {
-        bleSegment.setSegmentActive(mode == ScanMode.BLE)
-        cellSegment.setSegmentActive(mode == ScanMode.CELL)
-        bleSegment.setEnabledWithAlpha(enabled)
-        cellSegment.setEnabledWithAlpha(enabled)
+    /**
+     * Coche les sources sélectionnées et adapte la légende de sortie. Les
+     * lignes sont verrouillées pendant une capture ([enabled] = false).
+     */
+    fun renderSources(selected: Set<CaptureSource>, enabled: Boolean) {
+        sourceRows.forEach { (source, row) -> row.setState(source in selected, enabled) }
+        outputCaption.text = outputCaption(selected)
     }
 
-    fun renderAction(scanning: Boolean) {
+    fun renderAction(scanning: Boolean, canStart: Boolean) {
         if (scanning) {
-            actionButton.text = "Arrêter le scan"
+            actionButton.text = "Arrêter la capture"
             actionButton.background = stopBackground
         } else {
-            actionButton.text = "Démarrer le scan"
+            actionButton.text = "Démarrer la capture"
             actionButton.background = startBackground
         }
         actionButton.setTextColor(Colors.onAccent)
+        actionButton.setEnabledWithAlpha(scanning || canStart)
     }
 
     fun renderCounters(frames: Int, devices: Int) {
@@ -91,6 +119,19 @@ class MainScreenViews(
     fun renderFileCount(count: Int) {
         filesButton.text = if (count > 0) "Fichiers CSV · $count" else "Fichiers CSV"
     }
+
+    private fun outputCaption(selected: Set<CaptureSource>): String {
+        val events = CaptureSource.BLE in selected || CaptureSource.IMU in selected
+        val cell = CaptureSource.CELL in selected
+        return when {
+            selected.isEmpty() -> "Sélectionne au moins une source."
+            events && cell -> "Deux CSV par session, même identifiant: événements BLE/IMU et réseau mobile."
+            cell -> "Un CSV réseau mobile par session."
+            CaptureSource.BLE in selected && CaptureSource.IMU in selected ->
+                "Un CSV événementiel par session, BLE et IMU dans le même fichier."
+            else -> "Un CSV événementiel par session."
+        }
+    }
 }
 
 /**
@@ -99,7 +140,7 @@ class MainScreenViews(
  */
 fun Context.buildMainScreen(
     liveLines: List<LiveLine>,
-    onModeSelected: (ScanMode) -> Unit,
+    onSourceToggled: (CaptureSource) -> Unit,
     onToggleScan: () -> Unit,
     onClear: () -> Unit,
     onOpenFiles: () -> Unit,
@@ -115,37 +156,42 @@ fun Context.buildMainScreen(
         addView(statusChip)
     }
 
-    // --- Carte Scanner -----------------------------------------------------
-    val bleSegment = segmentButton("Bluetooth").apply {
-        setOnClickListener { onModeSelected(ScanMode.BLE) }
-    }
-    val cellSegment = segmentButton("Réseau mobile").apply {
-        setOnClickListener { onModeSelected(ScanMode.CELL) }
-    }
+    // --- Carte Sources -----------------------------------------------------
+    val sourceRows = linkedMapOf(
+        CaptureSource.BLE to sourceRow(
+            CaptureSource.BLE.label,
+            "Advertising BLE, iBeacon, Eddystone, DATI"
+        ) { onSourceToggled(CaptureSource.BLE) },
+        CaptureSource.CELL to sourceRow(
+            CaptureSource.CELL.label,
+            "Cellules LTE et NR, niveaux de signal"
+        ) { onSourceToggled(CaptureSource.CELL) },
+        CaptureSource.IMU to sourceRow(
+            CaptureSource.IMU.label,
+            "Accéléro, gyro, magnéto, baromètre, pas"
+        ) { onSourceToggled(CaptureSource.IMU) }
+    )
     val startBackground = buttonBackground(Colors.accent, Colors.accentPressed, null)
     val stopBackground = buttonBackground(Colors.danger, Colors.dangerPressed, null)
-    val actionButton = primaryButton("Démarrer le scan").apply {
+    val actionButton = primaryButton("Démarrer la capture").apply {
         textSize = Dimens.ACTION_SP
         background = startBackground
         setOnClickListener { onToggleScan() }
     }
+    val outputCaption = captionText("").apply {
+        gravity = Gravity.CENTER
+    }
 
-    val scannerCard = paddedPanel().apply {
-        addView(panelLabel("Scanner"), lpMatchWrap())
-        addView(
-            row().apply {
-                addView(bleSegment, lpWeight(dp(Dimens.TOUCH)))
-                addView(cellSegment, lpWeight(dp(Dimens.TOUCH), dp(Dimens.SPACE_8)))
-            },
-            lpMatchWrap(dp(Dimens.SPACE_8))
-        )
+    val sourcesCard = paddedPanel().apply {
+        addView(panelLabel("Sources"), lpMatchWrap())
+        sourceRows.values.forEachIndexed { index, row ->
+            addView(
+                row.root,
+                lpMatchHeight(dp(Dimens.TOUCH), dp(if (index == 0) Dimens.SPACE_8 else 6))
+            )
+        }
         addView(actionButton, lpMatchHeight(dp(Dimens.PRIMARY_ACTION), dp(Dimens.SPACE_12)))
-        addView(
-            captionText("En mode Bluetooth, BLE + IMU partagent un même CSV.").apply {
-                gravity = Gravity.CENTER
-            },
-            lpMatchWrap(dp(Dimens.SPACE_8))
-        )
+        addView(outputCaption, lpMatchWrap(dp(Dimens.SPACE_8)))
     }
 
     // --- Métriques ---------------------------------------------------------
@@ -225,7 +271,7 @@ fun Context.buildMainScreen(
 
     val root = screenRoot().apply {
         addView(header, lpMatchWrap())
-        addView(scannerCard, lpMatchWrap(dp(Dimens.SPACE_16)))
+        addView(sourcesCard, lpMatchWrap(dp(Dimens.SPACE_16)))
         addView(metricsRow, lpMatchWrap(dp(Dimens.SPACE_12)))
         addView(livePanel, lpFill(dp(Dimens.SPACE_12)))
         addView(
@@ -239,15 +285,62 @@ fun Context.buildMainScreen(
         liveList = liveList,
         adapter = feedAdapter,
         statusChip = statusChip,
-        bleSegment = bleSegment,
-        cellSegment = cellSegment,
+        sourceRows = sourceRows,
         actionButton = actionButton,
         startBackground = startBackground,
         stopBackground = stopBackground,
+        outputCaption = outputCaption,
         framesMetric = framesMetric,
         devicesMetric = devicesMetric,
         elapsedMetric = elapsedMetric,
         emptyView = emptyView,
         filesButton = filesButton
     )
+}
+
+/** Ligne « case + titre + description » cochable sur toute sa largeur. */
+private fun Context.sourceRow(title: String, description: String, onClick: () -> Unit): SourceRow {
+    val checkView = TextView(this).apply {
+        text = "✓"
+        textSize = 13f
+        typeface = Typeface.DEFAULT_BOLD
+        gravity = Gravity.CENTER
+        includeFontPadding = false
+        background = rounded(Colors.panel, 6, Colors.line)
+    }
+    val titleView = TextView(this).apply {
+        text = title
+        textSize = Dimens.BODY_SP
+        typeface = Typeface.DEFAULT_BOLD
+        setTextColor(Colors.text)
+        maxLines = 1
+        ellipsize = TextUtils.TruncateAt.END
+    }
+    val descriptionView = TextView(this).apply {
+        text = description
+        textSize = Dimens.PATH_SP
+        setTextColor(Colors.muted)
+        maxLines = 1
+        ellipsize = TextUtils.TruncateAt.END
+    }
+    val texts = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        addView(titleView, lpMatchWrap())
+        addView(descriptionView, lpMatchWrap())
+    }
+    val root = row().apply {
+        isClickable = true
+        isFocusable = true
+        setPadding(dp(Dimens.SPACE_12), 0, dp(Dimens.SPACE_12), 0)
+        background = rounded(Colors.control, Dimens.RADIUS_ROW, Colors.line)
+        addView(checkView, LinearLayout.LayoutParams(dp(22), dp(22)))
+        addView(
+            texts,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                leftMargin = dp(Dimens.SPACE_12)
+            }
+        )
+        setOnClickListener { onClick() }
+    }
+    return SourceRow(root, checkView, titleView)
 }

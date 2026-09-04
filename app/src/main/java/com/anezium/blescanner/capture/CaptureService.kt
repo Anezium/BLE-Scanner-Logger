@@ -1,4 +1,4 @@
-package com.anezium.blescanner.ble
+package com.anezium.blescanner.capture
 
 import android.Manifest
 import android.annotation.SuppressLint
@@ -6,7 +6,6 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
-import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
@@ -22,11 +21,11 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
-import com.anezium.blescanner.data.BleCsvLogger
+import com.anezium.blescanner.data.EventCsvLogger
 import com.anezium.blescanner.imu.ImuRecorder
 
-class BleScanService : Service() {
-    private var logger: BleCsvLogger? = null
+class CaptureService : Service() {
+    private var logger: EventCsvLogger? = null
     private var imuRecorder: ImuRecorder? = null
     private var scanActive = false
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -64,7 +63,7 @@ class BleScanService : Service() {
         Log.i(TAG, "onStartCommand action=${intent?.action}")
         when (intent?.action) {
             ACTION_STOP -> stopScanning()
-            else -> startScanning()
+            else -> startScanning(intent)
         }
         return START_STICKY
     }
@@ -78,65 +77,93 @@ class BleScanService : Service() {
     }
 
     @SuppressLint("MissingPermission", "InlinedApi")
-    private fun startScanning() {
+    private fun startScanning(intent: Intent?) {
         Log.i(TAG, "startScanning")
-        if (!hasScanPermission() || !hasConnectPermission()) {
-            Log.w(TAG, "Missing Bluetooth permission scan=${hasScanPermission()} connect=${hasConnectPermission()}")
-            publishStatus("Permission Bluetooth incomplète")
-            stopSelf()
+        if (logger != null) {
+            // Tout startForegroundService() doit être suivi d'un startForeground(),
+            // même si la session tourne déjà, sinon Android tue le service.
+            ServiceCompat.startForeground(
+                this,
+                NOTIFICATION_ID,
+                notification("Capture ${activeSources.label()} en cours"),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+            )
             return
         }
-        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            Log.w(TAG, "Missing fine location permission")
-            publishStatus("Permission localisation précise manquante")
-            stopSelf()
-            return
+
+        val requestedSources = buildSet {
+            if (intent?.getBooleanExtra(EXTRA_ENABLE_BLE, false) == true) add(CaptureSource.BLE)
+            if (intent?.getBooleanExtra(EXTRA_ENABLE_IMU, false) == true) add(CaptureSource.IMU)
         }
-        val adapter = (getSystemService(BLUETOOTH_SERVICE) as BluetoothManager).adapter
-        if (adapter == null || !adapter.isEnabled) {
-            Log.w(TAG, "Bluetooth disabled or adapter null")
-            publishStatus("Bluetooth désactivé")
+        if (requestedSources.isEmpty()) {
+            publishStatus("Aucune source événementielle sélectionnée")
+            activeSources = emptySet()
+            scanStartedAtElapsedMs = 0L
             stopSelf()
             return
         }
 
+        val sources = requestedSources.toMutableSet()
+        if (CaptureSource.BLE in sources) {
+            bluetoothPrerequisiteFailure()?.let { message ->
+                publishStatus(message)
+                sources -= CaptureSource.BLE
+                if (CaptureSource.IMU !in sources) {
+                    activeSources = emptySet()
+                    scanStartedAtElapsedMs = 0L
+                    stopSelf()
+                    return
+                }
+            }
+        }
+
+        val sessionId = intent?.getStringExtra(EXTRA_SESSION_ID)
+            ?.takeIf { it.isNotBlank() }
+            ?: SessionId.now()
+        val startedSources = sources.toSet()
         if (scanStartedAtElapsedMs == 0L) scanStartedAtElapsedMs = SystemClock.elapsedRealtime()
+        activeSources = startedSources
         ServiceCompat.startForeground(
             this,
             NOTIFICATION_ID,
-            notification("Scan BLE + IMU en cours"),
+            notification("Capture ${startedSources.label()} en cours"),
             ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
         )
-        if (logger != null) return
 
-        val sessionLogger = BleCsvLogger(applicationContext)
+        val sessionLogger = EventCsvLogger(applicationContext, sessionId, startedSources)
         logger = sessionLogger
-        val recorder = ImuRecorder(applicationContext, sessionLogger)
-        imuRecorder = recorder
-        runCatching { recorder.start() }
-            .onSuccess { result ->
-                Log.i(TAG, result.statusMessage())
-                publishStatus(result.statusMessage())
-            }
-            .onFailure { error ->
-                Log.e(TAG, "IMU registration failed", error)
-                publishStatus("IMU indisponible: ${error.javaClass.simpleName}")
-            }
-        val settings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-            .setReportDelay(0)
-            .build()
 
-        runCatching {
-            scanner.startScan(null, settings, callback)
-            scanActive = true
-            scheduleWatchdogRestart()
-            Log.i(TAG, "BluetoothLeScanner.startScan called")
-            publishStatus("Scan BLE démarré")
-        }.onFailure {
-            Log.e(TAG, "startScan failed", it)
-            publishStatus("Impossible de démarrer le scan: ${it.javaClass.simpleName}")
-            stopScanning()
+        if (CaptureSource.IMU in startedSources) {
+            val recorder = ImuRecorder(applicationContext, sessionLogger)
+            imuRecorder = recorder
+            runCatching { recorder.start() }
+                .onSuccess { result ->
+                    Log.i(TAG, result.statusMessage())
+                    publishStatus(result.statusMessage())
+                }
+                .onFailure { error ->
+                    Log.e(TAG, "IMU registration failed", error)
+                    publishStatus("IMU indisponible: ${error.javaClass.simpleName}")
+                }
+        }
+
+        if (CaptureSource.BLE in startedSources) {
+            val settings = ScanSettings.Builder()
+                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                .setReportDelay(0)
+                .build()
+
+            runCatching {
+                scanner.startScan(null, settings, callback)
+                scanActive = true
+                scheduleWatchdogRestart()
+                Log.i(TAG, "BluetoothLeScanner.startScan called")
+                publishStatus("Scan BLE démarré")
+            }.onFailure { error ->
+                Log.e(TAG, "startScan failed", error)
+                publishStatus("Impossible de démarrer le scan: ${error.javaClass.simpleName}")
+                disableBleOrStop()
+            }
         }
     }
 
@@ -145,7 +172,7 @@ class BleScanService : Service() {
         Log.i(TAG, "stopScanning")
         cancelWatchdogRestart()
         runCatching {
-            if (hasScanPermission()) scanner.stopScan(callback)
+            if (scanActive && hasScanPermission()) scanner.stopScan(callback)
         }.onFailure {
             Log.w(TAG, "stopScan failed", it)
         }
@@ -155,6 +182,7 @@ class BleScanService : Service() {
         logger?.close()
         logger = null
         scanStartedAtElapsedMs = 0L
+        activeSources = emptySet()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -164,7 +192,7 @@ class BleScanService : Service() {
         if (logger == null || !scanActive) return
         if (!hasScanPermission()) {
             publishStatus("Relance anti-throttle annulee: permission Bluetooth manquante")
-            stopScanning()
+            disableBleOrStop()
             return
         }
 
@@ -192,7 +220,7 @@ class BleScanService : Service() {
                 }.onFailure {
                     Log.e(TAG, "watchdog startScan failed", it)
                     publishStatus("Relance anti-throttle impossible: ${it.javaClass.simpleName}")
-                    stopScanning()
+                    disableBleOrStop()
                 }
             }
         }, WATCHDOG_RESTART_GAP_MS)
@@ -205,6 +233,40 @@ class BleScanService : Service() {
 
     private fun cancelWatchdogRestart() {
         mainHandler.removeCallbacks(watchdogRestart)
+    }
+
+    private fun bluetoothPrerequisiteFailure(): String? {
+        if (!hasScanPermission() || !hasConnectPermission()) {
+            Log.w(TAG, "Missing Bluetooth permission scan=${hasScanPermission()} connect=${hasConnectPermission()}")
+            return "Permission Bluetooth incomplète"
+        }
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            Log.w(TAG, "Missing fine location permission")
+            return "Permission localisation précise manquante"
+        }
+        val adapter = (getSystemService(BLUETOOTH_SERVICE) as BluetoothManager).adapter
+        if (adapter == null || !adapter.isEnabled) {
+            Log.w(TAG, "Bluetooth disabled or adapter null")
+            return "Bluetooth désactivé"
+        }
+        return null
+    }
+
+    private fun disableBleOrStop() {
+        cancelWatchdogRestart()
+        scanActive = false
+        val remainingSources = activeSources - CaptureSource.BLE
+        if (CaptureSource.IMU !in remainingSources) {
+            stopScanning()
+            return
+        }
+        activeSources = remainingSources
+        ServiceCompat.startForeground(
+            this,
+            NOTIFICATION_ID,
+            notification("Capture ${remainingSources.label()} en cours"),
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+        )
     }
 
     private fun hasScanPermission(): Boolean {
@@ -265,6 +327,8 @@ class BleScanService : Service() {
         var liveListener: ((Intent) -> Unit)? = null
         @Volatile
         var scanStartedAtElapsedMs: Long = 0L
+        @Volatile
+        var activeSources: Set<CaptureSource> = emptySet()
         const val ACTION_STOP = "com.anezium.blescanner.STOP"
         const val ACTION_SCAN_RESULT = "com.anezium.blescanner.SCAN_RESULT"
         const val ACTION_SCAN_STATUS = "com.anezium.blescanner.SCAN_STATUS"
@@ -273,6 +337,9 @@ class BleScanService : Service() {
         const val EXTRA_PREVIEW_RSSI = "preview_rssi"
         const val EXTRA_PREVIEW_CATEGORY = "preview_category"
         const val EXTRA_STATUS_MESSAGE = "status_message"
+        const val EXTRA_ENABLE_BLE = "enable_ble"
+        const val EXTRA_ENABLE_IMU = "enable_imu"
+        const val EXTRA_SESSION_ID = "session_id"
         private const val CHANNEL_ID = "ble_scan"
         private const val NOTIFICATION_ID = 1001
         private const val WATCHDOG_RESTART_INTERVAL_MS = 270_000L

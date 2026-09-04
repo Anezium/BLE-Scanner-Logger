@@ -20,18 +20,17 @@ import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 
 class CellularCsvLogger(
-    context: Context
+    context: Context,
+    val sessionStamp: String
 ) {
     val directory: File = File(context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS), "ble_logs")
-    val sessionStamp: String
     private val rawWriter: RotatingCsvWriter
 
     init {
         directory.mkdirs()
-        sessionStamp = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss").withZone(ZoneOffset.UTC).format(Instant.now())
         rawWriter = RotatingCsvWriter(
             directory = directory,
-            baseName = "cell_scan_$sessionStamp",
+            baseName = "session_${sessionStamp}_cell",
             header = RAW_HEADER
         )
     }
@@ -104,6 +103,7 @@ class CellularCsvLogger(
         val nowMs = System.currentTimeMillis()
         rawWriter.write(
             listOf(
+                sessionStamp,
                 iso(nowMs),
                 localIso(nowMs),
                 nowMs,
@@ -266,6 +266,7 @@ class CellularCsvLogger(
 
     companion object {
         private val RAW_HEADER = listOf(
+            "session_id",
             "wall_time_iso",
             "wall_time_local",
             "wall_time_ms_epoch",

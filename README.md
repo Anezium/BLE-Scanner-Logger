@@ -1,19 +1,22 @@
 # BLE Scanner Logger
 
-Application Android native Kotlin pour scanner les advertising BLE et archiver les capteurs IMU du téléphone hors connexion.
+Application Android native Kotlin pour enregistrer hors connexion, dans une même session, les advertising BLE, le réseau mobile (LTE/NR) et les capteurs IMU du téléphone.
 
 ## Objectif
 
-Le comportement principal est volontairement simple: enregistrer tout ce qu'Android remonte au scanner BLE et aux capteurs du téléphone, sans filtre et sans connexion GATT. Chaque advertising ou échantillon capteur conserve sa propre ligne et son propre timestamp.
+Le comportement principal est volontairement simple: enregistrer tout ce qu'Android remonte, sans filtre et sans connexion GATT, pour les sources choisies par l'utilisateur. Chaque advertising, mesure cellulaire ou échantillon capteur conserve sa propre ligne et son propre timestamp.
 
-Le journal CSV brut est la source de vérité. L'affichage live BLE sert seulement au contrôle rapide sur le terrain et garde les 200 dernières trames visibles; les centaines d'échantillons IMU par seconde ne sont pas injectées dans le flux live.
+Le journal CSV brut est la source de vérité. L'affichage live sert seulement au contrôle rapide sur le terrain et garde les 200 dernières trames visibles; les centaines d'échantillons IMU par seconde ne sont pas injectées dans le flux live.
 
 ## Fonctionnement
 
+- Trois sources activables indépendamment avant de démarrer une capture: `Bluetooth`, `Réseau mobile` et `IMU`. Toute combinaison non vide est acceptée; le choix est mémorisé entre deux lancements de l'app.
+- Une capture est une session: toutes les sources actives partagent le même identifiant `session_id` (horodatage UTC `YYYYMMDD_HHMMSS_SSS`) et la même base de temps monotone Android, ce qui permet de recouper les fichiers entre eux.
 - Scan BLE continu via `BluetoothLeScanner`.
 - Aucun filtre BLE par defaut: `startScan(null, settings, callback)`.
 - Mode scan low latency.
-- Collecte IMU simultanée pendant chaque session BLE:
+- Réseau mobile: cellules enregistrées et voisines (`CellInfo`) rafraîchies toutes les 2 s, niveaux de signal (`SignalStrength`) à chaque changement, plus un sondage OEM à haute cadence sur les téléphones qui l'exposent.
+- Collecte IMU quand la source est active:
   - accéléromètre 100 Hz;
   - gyroscope 100 Hz;
   - vecteur de rotation et game rotation vector 50 Hz;
@@ -21,7 +24,7 @@ Le journal CSV brut est la source de vérité. L'affichage live BLE sert seuleme
   - pression 10 Hz;
   - détecteur et compteur de pas à leur cadence événementielle.
 - Les variantes non calibrées de l'accéléromètre, du gyroscope et du magnétomètre sont privilégiées afin de garder le biais estimé. La variante calibrée sert automatiquement de fallback.
-- Foreground service `connectedDevice` pour maintenir le scan et les capteurs écran éteint.
+- Deux foreground services maintiennent la capture écran éteint: `connectedDevice` pour le BLE et l'IMU, `location` pour le réseau mobile. Ils démarrent et s'arrêtent ensemble.
 - Fonctionnement hors connexion.
 - Détection dynamique du matériel: un capteur absent ou refusé ne bloque pas la session et son état est écrit dans les métadonnées.
 - CSV local dans le dossier applicatif:
@@ -30,8 +33,10 @@ Le journal CSV brut est la source de vérité. L'affichage live BLE sert seuleme
   `/sdcard/Android/data/com.anezium.blescanner/files/Documents/ble_logs/`
 - Ce dossier est un stockage externe specifique a l'application. L'app peut le lire/ecrire sans permission fichier globale. Sur Android recent, il est souvent masque ou limite dans les gestionnaires de fichiers, mais il reste accessible via l'application, via l'export Android, et via ADB.
 - Les fichiers de ce dossier sont supprimés si l'application est désinstallée.
-- Rotation automatique des fichiers bruts:
-  `ble_imu_session_YYYYMMDD_HHMMSS_SSS_part001.csv`, `part002.csv`, etc.
+- Une session produit un ou deux fichiers, selon les sources actives, avec le même préfixe:
+  - `session_YYYYMMDD_HHMMSS_SSS_events_part001.csv`: journal événementiel BLE et/ou IMU;
+  - `session_YYYYMMDD_HHMMSS_SSS_cell_part001.csv`: mesures réseau mobile.
+- Rotation automatique des fichiers bruts: `part001.csv`, `part002.csv`, etc.
 - Rotation a 10 Mo ou 100 000 lignes par fichier.
 - L'affichage live est volontairement rafraîchi par paquets, environ deux fois par seconde, pour éviter de saturer le téléphone quand beaucoup de trames sont reçues.
 - L'écriture CSV reste exhaustive. Le flush disque est périodique, toutes les 100 lignes ou toutes les secondes, puis forcé à l'arrêt du scan.
@@ -45,16 +50,21 @@ clair unique, accent teal `#147B6C`.
 
 ### Écran principal
 
-- En-tête: titre « BLE Scanner » et une pastille d'état: « Prêt », « Scan en
-  cours » ou « Arrêté ».
-- Carte « Scanner »:
-  - un sélecteur à deux choix, `Bluetooth` ou `Réseau mobile` (le choix est
-    mémorisé pendant la session, il est verrouillé pendant un scan);
-  - un seul gros bouton: `Démarrer le scan` (teal), qui devient
-    `Arrêter le scan` (rouge) pendant un scan. Le rouge n'est utilisé que pour
-    cette action.
-- Trois compteurs BLE: nombre de trames reçues, nombre d'appareils distincts et
-  durée du scan en `HH:MM:SS`.
+- En-tête: titre « BLE Scanner » et une pastille d'état: « Prêt », « Capture en
+  cours » ou « Arrêtée ».
+- Carte « Sources »:
+  - trois lignes à cocher, `Bluetooth`, `Réseau mobile` et `IMU`, chacune avec
+    un rappel de ce qu'elle enregistre. Elles se combinent librement, le choix
+    est mémorisé et les lignes sont verrouillées pendant une capture;
+  - un seul gros bouton: `Démarrer la capture` (teal), qui devient
+    `Arrêter la capture` (rouge) pendant une capture. Le rouge n'est utilisé
+    que pour cette action. Le bouton est grisé tant qu'aucune source n'est
+    cochée;
+  - une légende sous le bouton indique combien de fichiers CSV la sélection
+    produira.
+- Trois compteurs: nombre de trames reçues (BLE et réseau mobile), nombre de
+  clés distinctes (adresses BLE, cellules) et durée de la capture en
+  `HH:MM:SS`. Les échantillons IMU ne sont pas comptés ici.
 - Panneau « Dernières trames »: les 200 dernières trames, la plus récente en
   haut, chacune sur un fond coloré selon son type (BLE, iBeacon, Eddystone UID,
   Eddystone TLM, DATI, réseau mobile, messages système). Un appui long sur une
@@ -88,19 +98,18 @@ clair unique, accent teal `#147B6C`.
 
 ## Permissions Android
 
-L'application demande les permissions necessaires selon la version Android:
+L'application ne demande, au moment de démarrer, que les permissions exigées par les sources cochées:
 
-- `BLUETOOTH_SCAN`
-- `BLUETOOTH_CONNECT`
-- `ACCESS_FINE_LOCATION`
-- `POST_NOTIFICATIONS` sur Android 13+
-- `FOREGROUND_SERVICE`
-- `FOREGROUND_SERVICE_CONNECTED_DEVICE`
-- `ACTIVITY_RECOGNITION` sur Android 10+ pour le détecteur et le compteur de pas
+- `Bluetooth`: `BLUETOOTH_SCAN` et `BLUETOOTH_CONNECT` (Android 12+), `ACCESS_FINE_LOCATION`, `ACCESS_COARSE_LOCATION`;
+- `Réseau mobile`: `READ_PHONE_STATE`, `ACCESS_FINE_LOCATION`, `ACCESS_COARSE_LOCATION`;
+- `IMU`: aucune permission bloquante; `ACTIVITY_RECOGNITION` (Android 10+) est demandée pour le détecteur et le compteur de pas;
+- toujours: `POST_NOTIFICATIONS` sur Android 13+ pour la notification du foreground service.
+
+Permissions déclarées dans le manifeste: `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_CONNECTED_DEVICE`, `FOREGROUND_SERVICE_LOCATION`, ainsi que `CHANGE_NETWORK_STATE`, permission normale qui satisfait le prérequis Android 14+ du type `connectedDevice` lorsqu'une session n'enregistre que l'IMU sans permission Bluetooth accordée.
 
 La permission d'activité physique est optionnelle: si elle est refusée, seuls le détecteur et le compteur de pas sont ignorés. Les autres capteurs et le BLE continuent normalement. La localisation précise est demandée car certains téléphones Android filtrent ou bloquent le scan BLE si elle est refusée.
 
-Au démarrage d'un scan, l'application vérifie aussi que le Bluetooth et la localisation de l'appareil sont activés (Android ne livre aucun résultat de scan BLE si la localisation système est éteinte, même avec toutes les permissions accordées). Si l'un des deux est éteint, un dialog système propose de l'activer en un tap, puis le scan démarre automatiquement. Si Play Services est absent, l'application ouvre directement l'écran de réglages concerné.
+Au démarrage d'une capture, l'application vérifie aussi que le Bluetooth (source `Bluetooth`) et la localisation de l'appareil (sources `Bluetooth` et `Réseau mobile`) sont activés: Android ne livre aucun résultat de scan BLE ni aucune identité de cellule si la localisation système est éteinte, même avec toutes les permissions accordées. Si l'un des deux est éteint, un dialog système propose de l'activer en un tap, puis la capture démarre automatiquement. Si Play Services est absent, l'application ouvre directement l'écran de réglages concerné. Une session IMU seule ne demande ni Bluetooth ni localisation.
 
 ## Schéma CSV événementiel BLE + IMU
 
@@ -182,6 +191,28 @@ session_id,sequence,event_type,wall_time_iso,...,event_time_nanos,received_time_
 20260903_121500_123,401,accelerometer_uncalibrated,2026-09-03T12:15:01.000Z,...,2328787496100388,2328787496200388,...,0.12,-0.31,9.74,...,,,
 20260903_121500_123,402,ble,2026-09-03T12:15:01.003Z,...,2328787499100388,2328787499300388,...,,,,...,C8:A6:EF:59:1E:1B,-48,0201181B...
 ```
+
+Les lignes `session_metadata` du début de fichier décrivent le téléphone, la version de l'app et la clé `capture_sources` (`ble`, `imu` ou `ble,imu`) réellement active pour la session.
+
+## Schéma CSV réseau mobile
+
+Fichier `session_<id>_cell_partNNN.csv`, une ligne par mesure. La colonne `elapsed_realtime_nanos` est dans la même base monotone que `event_time_nanos` du journal événementiel, ce qui permet d'aligner les deux fichiers d'une même session.
+
+| Colonne | Description |
+|---|---|
+| `session_id` | Même identifiant que le journal événementiel de la session. |
+| `wall_time_iso`, `wall_time_local`, `wall_time_ms_epoch` | Heure de réception, UTC, locale et epoch ms. |
+| `elapsed_realtime_nanos` | Heure de réception, base `elapsedRealtimeNanos`. |
+| `source` | Origine de la mesure: callback `SignalStrength`, liste `CellInfo`, sondage OEM. |
+| `subscription_id` | Abonnement SIM concerné. |
+| `rat` | Technologie radio (`LTE`, `NR`, etc.). |
+| `registered`, `connection_status` | Cellule servante ou voisine, état de connexion Android. |
+| `timestamp_nanos_android` | Timestamp Android du `CellInfo`. |
+| `mcc`, `mnc`, `ci`, `nci`, `pci`, `tac` | Identité de la cellule (LTE `ci`, NR `nci`). |
+| `arfcn`, `bands`, `bandwidth_khz` | Canal, bandes et largeur de bande. |
+| `rsrp_dbm`, `rsrq_db`, `sinr_db`, `rssi_dbm`, `rssnr_db`, `cqi`, `timing_advance` | Mesures radio, vides si Android ne les fournit pas. |
+| `level`, `asu_level`, `dbm` | Niveau Android générique. |
+| `raw_android` | `toString()` complet de l'objet Android, source de vérité. |
 
 ## Formats de trames
 
