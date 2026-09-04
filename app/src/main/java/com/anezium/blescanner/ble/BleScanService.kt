@@ -13,6 +13,7 @@ import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -20,10 +21,13 @@ import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import com.anezium.blescanner.data.BleCsvLogger
+import com.anezium.blescanner.imu.ImuRecorder
 
 class BleScanService : Service() {
     private var logger: BleCsvLogger? = null
+    private var imuRecorder: ImuRecorder? = null
     private var scanActive = false
     private val mainHandler = Handler(Looper.getMainLooper())
     private val scanner by lazy {
@@ -73,7 +77,7 @@ class BleScanService : Service() {
         super.onDestroy()
     }
 
-    @SuppressLint("MissingPermission")
+    @SuppressLint("MissingPermission", "InlinedApi")
     private fun startScanning() {
         Log.i(TAG, "startScanning")
         if (!hasScanPermission() || !hasConnectPermission()) {
@@ -97,10 +101,27 @@ class BleScanService : Service() {
         }
 
         if (scanStartedAtElapsedMs == 0L) scanStartedAtElapsedMs = SystemClock.elapsedRealtime()
-        startForeground(NOTIFICATION_ID, notification("Scan BLE en cours"))
+        ServiceCompat.startForeground(
+            this,
+            NOTIFICATION_ID,
+            notification("Scan BLE + IMU en cours"),
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+        )
         if (logger != null) return
 
-        logger = BleCsvLogger(applicationContext)
+        val sessionLogger = BleCsvLogger(applicationContext)
+        logger = sessionLogger
+        val recorder = ImuRecorder(applicationContext, sessionLogger)
+        imuRecorder = recorder
+        runCatching { recorder.start() }
+            .onSuccess { result ->
+                Log.i(TAG, result.statusMessage())
+                publishStatus(result.statusMessage())
+            }
+            .onFailure { error ->
+                Log.e(TAG, "IMU registration failed", error)
+                publishStatus("IMU indisponible: ${error.javaClass.simpleName}")
+            }
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .setReportDelay(0)
@@ -129,6 +150,8 @@ class BleScanService : Service() {
             Log.w(TAG, "stopScan failed", it)
         }
         scanActive = false
+        imuRecorder?.stop()
+        imuRecorder = null
         logger?.close()
         logger = null
         scanStartedAtElapsedMs = 0L

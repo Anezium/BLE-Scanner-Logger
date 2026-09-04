@@ -93,6 +93,10 @@ object CsvPageSource {
             ).joinToString(" ")
             return "$time  $rat  registered=$registered  RSRP $rsrp dBm  RSRQ $rsrq  SINR $sinr\n$source  $id"
         }
+        val eventType = value(values, indexes, "event_type")
+        if (eventType.isNotBlank() && eventType != "ble") {
+            return formatSensorOrMetadataPreview(eventType, values, indexes)
+        }
         val type = classifyCsvRow(values, indexes)
         val time = value(values, indexes, "wall_time_local")
             .ifBlank { value(values, indexes, "wall_time_iso") }
@@ -109,6 +113,54 @@ object CsvPageSource {
         }
         val namePart = if (name.isBlank()) "" else " name=$name"
         return "$time  $address  RSSI $rssi dBm$namePart\n$label\npayload=$payload"
+    }
+
+    private fun formatSensorOrMetadataPreview(
+        eventType: String,
+        values: List<String>,
+        indexes: Map<String, Int>
+    ): String {
+        val time = value(values, indexes, "wall_time_local")
+            .ifBlank { value(values, indexes, "wall_time_iso") }
+        val sensorType = value(values, indexes, "sensor_type")
+        return when (eventType) {
+            "session_metadata" -> {
+                "$time  SESSION  ${value(values, indexes, "metadata_key")}" +
+                    "=${value(values, indexes, "metadata_value")}"
+            }
+            "sensor_metadata" -> {
+                val channel = value(values, indexes, "sensor_channel")
+                val name = value(values, indexes, "sensor_name")
+                val available = value(values, indexes, "sensor_available")
+                val registered = value(values, indexes, "sensor_registered")
+                val period = value(values, indexes, "sensor_requested_period_us")
+                val reason = value(values, indexes, "metadata_value")
+                "$time  SENSOR $channel  available=$available registered=$registered\n" +
+                    "$sensorType · $name · period=${period}us · $reason"
+            }
+            "sensor_accuracy" -> {
+                "$time  ACCURACY $sensorType  ${value(values, indexes, "sensor_accuracy")}"
+            }
+            "sensor_summary" -> {
+                val count = value(values, indexes, "sensor_sample_count")
+                val rate = value(values, indexes, "sensor_observed_rate_hz")
+                "$time  SUMMARY $sensorType  samples=$count  mean=${rate}Hz"
+            }
+            else -> {
+                val scalar = value(values, indexes, "sensor_scalar")
+                val unit = value(values, indexes, "sensor_unit")
+                val sample = if (scalar.isNotBlank()) {
+                    "value=$scalar $unit"
+                } else {
+                    val x = value(values, indexes, "sensor_x")
+                    val y = value(values, indexes, "sensor_y")
+                    val z = value(values, indexes, "sensor_z")
+                    val w = value(values, indexes, "sensor_w")
+                    "x=$x y=$y z=$z" + if (w.isBlank()) " $unit" else " w=$w"
+                }
+                "$time  ${eventType.uppercase(Locale.US)}\n$sample"
+            }
+        }
     }
 
     private fun classifyCsvRow(values: List<String>, indexes: Map<String, Int>): String {

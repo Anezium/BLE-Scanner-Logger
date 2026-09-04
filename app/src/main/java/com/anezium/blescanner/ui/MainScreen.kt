@@ -141,7 +141,7 @@ fun Context.buildMainScreen(
         )
         addView(actionButton, lpMatchHeight(dp(Dimens.PRIMARY_ACTION), dp(Dimens.SPACE_12)))
         addView(
-            captionText("Chaque trame reçue est enregistrée en CSV.").apply {
+            captionText("En mode Bluetooth, BLE + IMU partagent un même CSV.").apply {
                 gravity = Gravity.CENTER
             },
             lpMatchWrap(dp(Dimens.SPACE_8))

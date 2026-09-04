@@ -451,7 +451,7 @@ class MainActivity : android.app.Activity() {
     // --- Permissions -------------------------------------------------------
 
     private fun requestNeededPermissions() {
-        val missing = requiredPermissions().filter {
+        val missing = permissionsToRequest().filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
         if (missing.isNotEmpty()) {
@@ -467,7 +467,19 @@ class MainActivity : android.app.Activity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode != REQUEST_PERMISSIONS) return
         if (hasRequiredPermissions()) {
-            liveFeed.add("SYSTEM  Permissions accordées", "system")
+            val stepPermissionGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
+                ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.ACTIVITY_RECOGNITION
+                ) == PackageManager.PERMISSION_GRANTED
+            liveFeed.add(
+                if (stepPermissionGranted) {
+                    "SYSTEM  Permissions accordées"
+                } else {
+                    "SYSTEM  Permissions principales accordées; détection de pas désactivée"
+                },
+                "system"
+            )
             if (startAfterPermissionGrant) {
                 val mode = pendingScanMode ?: scanMode
                 startAfterPermissionGrant = false
@@ -503,6 +515,14 @@ class MainActivity : android.app.Activity() {
         }
         return permissions
     }
+
+    /** La permission des pas est optionnelle: son refus ne bloque ni le BLE ni le reste de l'IMU. */
+    private fun permissionsToRequest(): List<String> =
+        requiredPermissions() + if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            listOf(Manifest.permission.ACTIVITY_RECOGNITION)
+        } else {
+            emptyList()
+        }
 
     // --- Activation Bluetooth / localisation --------------------------------
 
