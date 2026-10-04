@@ -348,3 +348,9 @@ Installation via ADB:
 ```powershell
 adb install -r app\build\outputs\apk\debug\app-debug.apk
 ```
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE) for attribution.
+
+Contributions are accepted under the same license (Apache-2.0, section 5) — no CLA required.
